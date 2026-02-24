@@ -1,0 +1,15 @@
+name: shared_dart
+description: Shared API models and client for N Wallet.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.8.1
+
+dependencies:
+  dio: ^5.7.0
+  equatable: ^2.0.7
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.8

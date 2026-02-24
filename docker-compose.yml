@@ -1,0 +1,71 @@
+services:
+  backend_php:
+    build:
+      context: ./backend_api
+      dockerfile: Dockerfile
+    container_name: nwallet_backend_php
+    ports:
+      - "${BACKEND_PORT:-8080}:8000"
+    env_file:
+      - .env.docker
+    depends_on:
+      - mongo
+      - face_service
+    volumes:
+      - ./.env.docker:/var/www/html/.env:ro
+      - backend_storage:/var/www/html/storage/app
+    command: sh -c "php artisan serve --host=0.0.0.0 --port=8000"
+
+  mongo:
+    image: mongo:7
+    container_name: nwallet_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: rootpass
+    volumes:
+      - mongo_data:/data/db
+
+  face_service:
+    build:
+      context: ./face_service
+      dockerfile: Dockerfile
+    container_name: nwallet_face_service
+    restart: unless-stopped
+    ports:
+      - "8090:8001"
+    environment:
+      FACE_MODEL_NAME: buffalo_l
+      FACE_MODEL_VERSION: arcface-onnx-1.0
+
+  admin_web:
+    image: nginx:1.27-alpine
+    container_name: nwallet_admin_web
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_WEB_PORT:-18081}:80"
+    volumes:
+      - ./admin_web/build/web:/usr/share/nginx/html:ro
+      - ./deploy/nginx_admin.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend_php
+
+  mongo-express:
+    image: mongo-express:1.0.2-20
+    container_name: nwallet_mongo_express
+    restart: unless-stopped
+    profiles: ["dev"]
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD: rootpass
+      ME_CONFIG_MONGODB_SERVER: mongo
+    depends_on:
+      - mongo
+
+volumes:
+  mongo_data:
+  backend_storage:

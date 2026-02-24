@@ -1,0 +1,19 @@
+# Flutter
+**/.dart_tool/
+**/build/
+**/.packages
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+
+# Python
+**/__pycache__/
+**/.pytest_cache/
+
+# Local env
+.env
+backend_api/.env
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
