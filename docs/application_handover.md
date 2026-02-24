@@ -25,7 +25,7 @@ The system has four main runtime components:
 - One attendance record per student/session (DB unique index).
 - Course code is auto-generated internally (`CRS-0001`, `CRS-0002`, ...).
 - In admin course create/update, module codes are auto-created if missing.
-- Mobile app support ticket section is removed from UI.
+- Support ticket feature is removed from both mobile and backend APIs.
 
 ## 4) Current User Flows
 - Student:
@@ -88,7 +88,6 @@ Security note:
 ## 9) Known Limitations
 - HTTP-first deployment, no TLS reverse proxy in current setup.
 - No refresh token flow for JWT.
-- Mobile support ticket UI removed; backend endpoint still exists but is unused by current app UI.
 
 ## 10) Handover Checklist
 - Repository access confirmed.
@@ -96,4 +95,4 @@ Security note:
 - API health endpoint confirmed.
 - Admin student edit/delete endpoints confirmed.
 - Course create behavior confirmed (auto module creation, auto course code).
-- Mobile UI updated to remove support section.
+- Support ticket feature removed from mobile and backend.

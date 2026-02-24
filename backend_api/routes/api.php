@@ -16,7 +16,6 @@ use App\Http\Controllers\Api\V1\StudentAuthController;
 use App\Http\Controllers\Api\V1\StudentEnrollmentController;
 use App\Http\Controllers\Api\V1\StudentProfileController;
 use App\Http\Controllers\Api\V1\StudentSessionController;
-use App\Http\Controllers\Api\V1\StudentSupportController;
 use App\Http\Controllers\Api\V1\TimetableImportController;
 use Illuminate\Support\Facades\Route;
 
@@ -49,8 +48,6 @@ Route::prefix('v1')->group(function (): void {
             Route::post('/submit', [StudentAttendanceController::class, 'submit']);
             Route::get('/history', [StudentAttendanceController::class, 'history']);
         });
-
-        Route::post('/support/report-issue', [StudentSupportController::class, 'reportIssue']);
     });
 
     Route::middleware(['auth:admin_api', 'token.type:admin'])->prefix('admin')->group(function (): void {

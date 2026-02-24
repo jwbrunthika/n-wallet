@@ -18,5 +18,4 @@ For physical devices, replace API URL with your VPS/public host.
 - Session detail
 - Attendance flow (face capture + beacon scan + submit)
 - History
-- Support report issue
 - Settings/logout

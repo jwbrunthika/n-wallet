@@ -111,14 +111,6 @@ class NWalletApi {
     ).map((item) => Map<String, dynamic>.from(item as Map)).toList();
   }
 
-  Future<Map<String, dynamic>> reportIssue(String message) async {
-    final response = await _dio.post(
-      '/student/support/report-issue',
-      data: {'message': message},
-    );
-    return _extractDataMap(response.data);
-  }
-
   Future<Map<String, dynamic>> adminLogin(String email, String password) async {
     final response = await _dio.post(
       '/auth/admin/login',
