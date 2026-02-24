@@ -14,6 +14,8 @@ N Wallet is a student attendance system that accepts attendance **only** when:
 ## Monorepo Structure
 - `docker-compose.yml`
 - `.env.docker`
+- `docs/application_handover.md`
+- `docs/server_handover.md`
 - `backend_api/` Laravel API
 - `face_service/` FastAPI service
 - `mobile_app/` Flutter student app
@@ -93,6 +95,10 @@ flutter run --dart-define=API_BASE_URL=http://51.255.201.31:18082/api/v1
 
 ## Optional HTTPS (demo out of scope)
 Current setup is HTTP-first for student project simplicity. For production-like deployment, place API behind TLS reverse proxy and rotate credentials.
+
+## Handover Documents
+- Application handover: `docs/application_handover.md`
+- Server handover: `docs/server_handover.md`
 
 ## Mobile Networking Notes
 - Android emulator -> use `http://51.255.201.31:18082/api/v1`
