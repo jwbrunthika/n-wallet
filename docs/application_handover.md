@@ -72,7 +72,33 @@ Important groups:
 Security note:
 - Rotate admin credentials, SMTP app password, Mongo credentials, APP/JWT keys immediately after handover.
 
-## 8) Build and Run (Developer)
+## 8) Encryption and Security Methods
+- Password hashing:
+  - Admin passwords are stored as one-way hashes using Laravel `Hash::make(...)`.
+  - Admin login validates passwords with `Hash::check(...)` (plain text is never stored).
+- OTP protection:
+  - OTP values are hashed before persistence (`otpHash`).
+  - OTP requests enforce expiry, resend cooldown, max attempts, and single-use verification state.
+  - MongoDB TTL index on `otp_requests.expiresAt` auto-cleans expired OTP records.
+- Face template encryption:
+  - Enrollment embedding vectors are serialized JSON, encrypted with Laravel `Crypt::encryptString(...)`, then base64-encoded into `faceTemplate.encryptedVector`.
+  - Stored algorithm marker: `laravel_crypt_aes_256_cbc_base64`.
+  - Decryption happens server-side only during attendance face verification.
+- JWT auth separation:
+  - Separate guards for students and admins.
+  - JWT custom claim `token_type` plus middleware `token.type` prevents cross-using student/admin tokens on wrong endpoint groups.
+- Data integrity constraints:
+  - Unique indexes enforce identities and anti-duplication (for example, one attendance per `studentEmail + sessionId`).
+  - Beacon mapping uniqueness enforced (`uuid + major + minor`, and one beacon per hall).
+- Protected file access:
+  - Enrollment images are served through admin-protected API endpoints (not public static hosting).
+- Audit logging:
+  - Security-relevant admin actions are persisted in `audit_logs` (login, beacon mapping changes, timetable import, enrollment reset, enrollment image access).
+- Transport security posture:
+  - Current deployment is HTTP-first for demo simplicity.
+  - HTTPS/TLS reverse proxy should be added for production.
+
+## 9) Build and Run (Developer)
 - Backend stack:
   - `docker compose up -d --build`
   - `./scripts/bootstrap_backend.sh`
@@ -85,11 +111,11 @@ Security note:
   - `flutter pub get`
   - `flutter run --dart-define=API_BASE_URL=http://51.255.201.31:18082/api/v1`
 
-## 9) Known Limitations
+## 10) Known Limitations
 - HTTP-first deployment, no TLS reverse proxy in current setup.
 - No refresh token flow for JWT.
 
-## 10) Handover Checklist
+## 11) Handover Checklist
 - Repository access confirmed.
 - Admin login confirmed.
 - API health endpoint confirmed.
