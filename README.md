@@ -99,6 +99,7 @@ Current setup is HTTP-first for student project simplicity. For production-like 
 ## Handover Documents
 - Application handover: `docs/application_handover.md`
 - Server handover: `docs/server_handover.md`
+- Source code handover: `docs/source_code_handover.md`
 
 ## Mobile Networking Notes
 - Android emulator -> use `http://51.255.201.31:18082/api/v1`
