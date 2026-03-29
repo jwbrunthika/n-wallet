@@ -1230,8 +1230,12 @@ class TimetableImportPage extends StatefulWidget {
 
 class _TimetableImportPageState extends State<TimetableImportPage> {
   String? selectedFile;
+  Map<String, dynamic>? _lastImportSummary;
+  List<Map<String, dynamic>> _lastImportErrors = const [];
+  String? _lastImportMessage;
+  bool _importing = false;
   static const String _requiredHeaders =
-      'session_date,start_time,end_time,course_name,module_code,module_name,hall_name,batch,delivery_mode,lecturer_email,attendance_open_minutes_before,attendance_close_minutes_after,notes';
+      'session_date,start_time,end_time,course_name,module_code,module_name,hall_name,batch,delivery_mode,lecturer_email,attendance_open_minutes_after_start,attendance_close_minutes_before_end,notes';
   static const String _exampleRow =
       '2026-02-23,09:00,11:00,BSc Software Engineering,SE401,Software Engineering Project,Hall A,Batch-01,WEEKDAY,lecturer1@university.edu,20,15,Week 1 lecture';
 
@@ -1239,127 +1243,300 @@ class _TimetableImportPageState extends State<TimetableImportPage> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Upload timetable CSV',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'CSV format guide',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF5F7FA),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE1E6EF)),
+              ),
+              child: const SelectableText(
+                'Required headers:\n$_requiredHeaders',
+                style: TextStyle(fontFamily: 'monospace'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF5F7FA),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE1E6EF)),
+              ),
+              child: const SelectableText(
+                'Example row:\n$_exampleRow',
+                style: TextStyle(fontFamily: 'monospace'),
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Tip: You can use sample-data/timetable_sample.csv as a template.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Legacy support: course_code column is still accepted but optional.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Attendance columns now mean: opens X minutes after start, closes Y minutes before end. Legacy before/after header names are still accepted.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Date accepts YYYY-MM-DD or M/D/YYYY. Time accepts HH:MM or hour values like 9, 14.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: _importing ? null : _importCsv,
+              child: Text(
+                _importing ? 'Importing...' : 'Choose CSV and Import',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              selectedFile == null
+                  ? 'No file selected'
+                  : 'Selected: $selectedFile',
+            ),
+            if (_lastImportSummary != null || _lastImportMessage != null) ...[
+              const SizedBox(height: 16),
+              _buildImportResultCard(),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _importCsv() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+      withData: true,
+    );
+
+    if (result == null || result.files.isEmpty) {
+      return;
+    }
+
+    final file = result.files.first;
+    setState(() {
+      selectedFile = file.name;
+      _importing = true;
+      _lastImportMessage = null;
+    });
+
+    try {
+      final summary = await widget.controller.importCsv(file);
+      final errors = (summary['errors'] as List? ?? [])
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+      final inserted = (summary['inserted'] as num?)?.toInt() ?? 0;
+      final errorCount = (summary['errorCount'] as num?)?.toInt() ?? 0;
+      final errorRowCount =
+          (summary['errorRowCount'] as num?)?.toInt() ?? errorCount;
+      final status = (summary['status'] as String?) ?? 'SUCCESS';
+
+      setState(() {
+        _lastImportSummary = summary;
+        _lastImportErrors = errors;
+        _lastImportMessage = null;
+      });
+
+      if (status == 'FAILED' || inserted == 0) {
+        Get.snackbar(
+          'Import failed',
+          'No timetable rows imported. Review the row errors below.',
+        );
+      } else if (errorCount > 0) {
+        Get.snackbar(
+          'Import partial',
+          'Imported $inserted row(s). Rejected $errorRowCount row(s). Review the errors below.',
+        );
+      } else {
+        Get.snackbar(
+          'Import complete',
+          'CSV imported successfully. $inserted row(s) added.',
+        );
+      }
+    } catch (error) {
+      setState(() {
+        _lastImportSummary = null;
+        _lastImportErrors = const [];
+        _lastImportMessage = extractApiError(error);
+      });
+      Get.snackbar('Import failed', extractApiError(error));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _importing = false;
+        });
+      }
+    }
+  }
+
+  Widget _buildImportResultCard() {
+    final summary = _lastImportSummary;
+    final status = (summary?['status'] as String?) ?? 'FAILED';
+    final inserted = (summary?['inserted'] as num?)?.toInt() ?? 0;
+    final errorCount = (summary?['errorCount'] as num?)?.toInt() ?? 0;
+    final errorRowCount =
+        (summary?['errorRowCount'] as num?)?.toInt() ?? errorCount;
+    final totalRows = (summary?['totalRows'] as num?)?.toInt() ?? 0;
+    final background = switch (status) {
+      'SUCCESS' => const Color(0xFFE9F8EF),
+      'PARTIAL' => const Color(0xFFFFF6E5),
+      _ => const Color(0xFFFDECEC),
+    };
+    final accent = switch (status) {
+      'SUCCESS' => const Color(0xFF1E8E3E),
+      'PARTIAL' => const Color(0xFFB26A00),
+      _ => const Color(0xFFC62828),
+    };
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: accent.withValues(alpha: 0.3)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Upload timetable CSV',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'CSV format guide',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 6),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF5F7FA),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFFE1E6EF)),
-            ),
-            child: const SelectableText(
-              'Required headers:\n$_requiredHeaders',
-              style: TextStyle(fontFamily: 'monospace'),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF5F7FA),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFFE1E6EF)),
-            ),
-            child: const SelectableText(
-              'Example row:\n$_exampleRow',
-              style: TextStyle(fontFamily: 'monospace'),
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Tip: You can use sample-data/timetable_sample.csv as a template.',
-            style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Legacy support: course_code column is still accepted but optional.',
-            style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Date accepts YYYY-MM-DD or M/D/YYYY. Time accepts HH:MM or hour values like 9, 14.',
-            style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
-          ),
-          const SizedBox(height: 12),
-          FilledButton(
-            onPressed: () async {
-              final result = await FilePicker.platform.pickFiles(
-                type: FileType.custom,
-                allowedExtensions: ['csv'],
-                withData: true,
-              );
-
-              if (result == null || result.files.isEmpty) {
-                return;
-              }
-
-              final file = result.files.first;
-              setState(() {
-                selectedFile = file.name;
-              });
-
-              try {
-                final summary = await widget.controller.importCsv(file);
-                final inserted = (summary['inserted'] as num?)?.toInt() ?? 0;
-                final errorCount =
-                    (summary['errorCount'] as num?)?.toInt() ?? 0;
-                final status = (summary['status'] as String?) ?? 'SUCCESS';
-                final errors = (summary['errors'] as List? ?? [])
-                    .map((item) => Map<String, dynamic>.from(item as Map))
-                    .toList();
-                final firstError = errors.isNotEmpty
-                    ? ' Row ${(errors.first['row'] ?? '-').toString()}: ${(errors.first['message'] ?? 'Unknown error').toString()}'
-                    : '';
-
-                if (status == 'FAILED' || inserted == 0) {
-                  Get.snackbar(
-                    'Import failed',
-                    'No timetable rows imported.$firstError',
-                  );
-                  return;
-                }
-
-                if (errorCount > 0) {
-                  Get.snackbar(
-                    'Import partial',
-                    'Imported $inserted row(s). Skipped $errorCount row(s).$firstError',
-                  );
-                  return;
-                }
-
-                Get.snackbar(
-                  'Import complete',
-                  'CSV imported successfully. $inserted row(s) added.',
-                );
-              } catch (error) {
-                Get.snackbar('Import failed', extractApiError(error));
-              }
-            },
-            child: const Text('Choose CSV and Import'),
-          ),
-          const SizedBox(height: 8),
           Text(
-            selectedFile == null
-                ? 'No file selected'
-                : 'Selected: $selectedFile',
+            _lastImportMessage ?? _statusLabel(status),
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: accent,
+            ),
           ),
+          if (summary != null) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 16,
+              runSpacing: 8,
+              children: [
+                _summaryChip('Imported', inserted.toString()),
+                _summaryChip('Rejected Rows', errorRowCount.toString()),
+                _summaryChip('Error Details', errorCount.toString()),
+                _summaryChip('Rows Read', totalRows.toString()),
+              ],
+            ),
+          ],
+          if (_lastImportErrors.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            const Text(
+              'Row-level errors',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Row numbers match the CSV file, including the header row.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5C6B83)),
+            ),
+            const SizedBox(height: 12),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                headingRowColor: WidgetStatePropertyAll(
+                  Colors.white.withValues(alpha: 0.75),
+                ),
+                columns: const [
+                  DataColumn(label: Text('Row')),
+                  DataColumn(label: Text('Column')),
+                  DataColumn(label: Text('Value')),
+                  DataColumn(label: Text('Error')),
+                ],
+                rows: _lastImportErrors
+                    .map(
+                      (error) => DataRow(
+                        cells: [
+                          DataCell(Text((error['row'] ?? '-').toString())),
+                          DataCell(Text(_displayErrorColumn(error['column']))),
+                          DataCell(
+                            SizedBox(
+                              width: 180,
+                              child: Text(
+                                _displayErrorValue(error['value']),
+                                softWrap: true,
+                              ),
+                            ),
+                          ),
+                          DataCell(
+                            SizedBox(
+                              width: 420,
+                              child: Text(
+                                (error['message'] ?? 'Unknown error')
+                                    .toString(),
+                                softWrap: true,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  Widget _summaryChip(String label, String value) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text('$label: $value'),
+    );
+  }
+
+  String _statusLabel(String status) {
+    switch (status) {
+      case 'SUCCESS':
+        return 'Import complete';
+      case 'PARTIAL':
+        return 'Import completed with skipped rows';
+      default:
+        return 'Import failed';
+    }
+  }
+
+  String _displayErrorColumn(Object? value) {
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? '-' : text;
+  }
+
+  String _displayErrorValue(Object? value) {
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? '-' : text;
   }
 }
 

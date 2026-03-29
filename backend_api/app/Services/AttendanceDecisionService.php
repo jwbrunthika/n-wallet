@@ -22,7 +22,7 @@ class AttendanceDecisionService
 
     /**
      * @param array<int, UploadedFile> $faceFrames
-     * @param array{uuid:string,major:int,minor:int,avgRssi:float,durationSec:int,pingCount?:int} $beaconEvidence
+     * @param array{uuid:string,major:int,minor:int,avgRssi:float,durationSec:int,distanceMeters?:?float} $beaconEvidence
      */
     public function submit(Student $student, string $sessionId, array $faceFrames, array $beaconEvidence): array
     {
@@ -62,7 +62,7 @@ class AttendanceDecisionService
         $faceThreshold = (float) ($setting->faceMatchThreshold ?? env('FACE_MATCH_THRESHOLD', 0.55));
         $beaconRssiThreshold = (float) ($setting->beaconRssiThreshold ?? env('BEACON_RSSI_THRESHOLD', -70));
         $beaconStabilitySeconds = (int) ($setting->beaconStabilitySeconds ?? env('BEACON_STABILITY_SECONDS', 8));
-        $beaconMinPingCount = (int) env('BEACON_MIN_PINGS', 5);
+        $beaconMaxDistanceMeters = (float) env('BEACON_MAX_DISTANCE_METERS', 10);
 
         $bestFaceScore = $this->identityVerificationService->bestFaceScore($student, $faceFrames);
         $facePass = $bestFaceScore >= $faceThreshold;
@@ -89,7 +89,7 @@ class AttendanceDecisionService
             $beaconEvidence,
             $beaconRssiThreshold,
             $beaconStabilitySeconds,
-            $beaconMinPingCount
+            $beaconMaxDistanceMeters
         );
 
         if (! $facePass) {
@@ -131,8 +131,11 @@ class AttendanceDecisionService
         $sessionStart = Carbon::parse($session->sessionDate.' '.$session->startTime, $timezone);
         $sessionEnd = Carbon::parse($session->sessionDate.' '.$session->endTime, $timezone);
 
-        $windowOpen = $sessionStart->copy()->subMinutes((int) $session->attendanceOpenMinutesBefore);
-        $windowClose = $sessionEnd->copy()->addMinutes((int) $session->attendanceCloseMinutesAfter);
+        // Stored field names are legacy, but current semantics are:
+        // - attendanceOpenMinutesBefore => minutes after session start
+        // - attendanceCloseMinutesAfter => minutes before session end
+        $windowOpen = $sessionStart->copy()->addMinutes((int) $session->attendanceOpenMinutesBefore);
+        $windowClose = $sessionEnd->copy()->subMinutes((int) $session->attendanceCloseMinutesAfter);
 
         $now = Carbon::now($timezone);
 

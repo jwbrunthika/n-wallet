@@ -1,4 +1,4 @@
-session_date,start_time,end_time,course_name,module_code,module_name,hall_name,batch,delivery_mode,lecturer_email,attendance_open_minutes_before,attendance_close_minutes_after,notes
+session_date,start_time,end_time,course_name,module_code,module_name,hall_name,batch,delivery_mode,lecturer_email,attendance_open_minutes_after_start,attendance_close_minutes_before_end,notes
 2026-02-23,09:00,11:00,BSc Software Engineering,SE401,Software Engineering Project,Hall A,Batch-01,WEEKDAY,lecturer1@university.edu,20,15,Week 1 lecture
 2026-02-23,13:00,15:00,BSc Software Engineering,SE402,Advanced Web Engineering,Hall B,Batch-02,WEEKDAY,lecturer2@university.edu,15,10,Lab session
 2026-02-24,10:00,12:00,BSc Software Engineering,SE401,Software Engineering Project,Hall A,Batch-01,WEEKDAY,lecturer1@university.edu,20,15,Week 2 lecture

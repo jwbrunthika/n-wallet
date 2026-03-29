@@ -7,9 +7,9 @@ use App\Models\Beacon;
 class BeaconValidationService
 {
     /**
-     * @param array{uuid:string,major:int,minor:int,avgRssi:float,durationSec:int,pingCount?:int} $evidence
+     * @param array{uuid:string,major:int,minor:int,avgRssi:float,durationSec:int,distanceMeters?:?float} $evidence
      */
-    public function validate(Beacon $expectedBeacon, array $evidence, float $rssiThreshold, int $stabilitySeconds, int $minPingCount = 5): array
+    public function validate(Beacon $expectedBeacon, array $evidence, float $rssiThreshold, int $stabilitySeconds, float $maxDistanceMeters = 10.0): array
     {
         if (
             strtolower((string) $expectedBeacon->uuid) !== strtolower((string) ($evidence['uuid'] ?? '')) ||
@@ -24,8 +24,10 @@ class BeaconValidationService
         }
 
         $durationSec = (int) ($evidence['durationSec'] ?? 0);
-        $pingCount = (int) ($evidence['pingCount'] ?? 0);
-        if ($durationSec < $stabilitySeconds && $pingCount < $minPingCount) {
+        $distanceMeters = isset($evidence['distanceMeters']) ? (float) $evidence['distanceMeters'] : null;
+        $distancePass = $distanceMeters !== null && $distanceMeters > 0 && $distanceMeters <= $maxDistanceMeters;
+
+        if ($durationSec < $stabilitySeconds && ! $distancePass) {
             return ['passed' => false, 'reasonCode' => 'BEACON_UNSTABLE'];
         }
 

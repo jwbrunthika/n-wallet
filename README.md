@@ -133,6 +133,6 @@ Use `sample-data/timetable_sample.csv` with the import page in admin web.
    - `studyMode` (`WEEKDAY` or `WEEKEND`)
    - Enrollment is blocked until this profile is assigned (`ACADEMIC_PROFILE_REQUIRED`).
 4. Import timetable CSV with course-specific headers:
-   - `session_date,start_time,end_time,course_name,module_code,module_name,hall_name,batch,delivery_mode,lecturer_email,attendance_open_minutes_before,attendance_close_minutes_after,notes`
+   - `session_date,start_time,end_time,course_name,module_code,module_name,hall_name,batch,delivery_mode,lecturer_email,attendance_open_minutes_after_start,attendance_close_minutes_before_end,notes`
    - `course_code` is still supported as a legacy optional column.
 5. Student app automatically receives only sessions matching student `courseCode + batch + studyMode`.

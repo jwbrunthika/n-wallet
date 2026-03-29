@@ -401,7 +401,7 @@ class StudentDataController extends GetxController {
 
 const double kBeaconUiRssiThreshold = -70;
 const int kBeaconUiStabilitySeconds = 8;
-const int kBeaconUiMinPingCount = 5;
+const double kBeaconUiMaxDistanceMeters = 10;
 const double kBeaconPreviewRssiThreshold = -90;
 const int kBeaconPreviewStabilitySeconds = 1;
 
@@ -429,7 +429,7 @@ class BeaconScanResult {
 
 class BeaconScanController extends GetxController {
   final RxBool scanning = false.obs;
-  final RxInt pingCount = 0.obs;
+  final RxnDouble distanceMeters = RxnDouble();
 
   Future<BeaconScanResult> scanEvidence({
     required String uuid,
@@ -438,7 +438,7 @@ class BeaconScanController extends GetxController {
     int scanSeconds = 10,
     double rssiThreshold = kBeaconUiRssiThreshold,
     int stabilitySeconds = kBeaconUiStabilitySeconds,
-    int minPingCount = kBeaconUiMinPingCount,
+    double maxDistanceMeters = kBeaconUiMaxDistanceMeters,
   }) async {
     BeaconScanResult emptyResult(BeaconScanStatus status) {
       return BeaconScanResult(
@@ -449,7 +449,7 @@ class BeaconScanController extends GetxController {
           minor: minor,
           avgRssi: -999,
           durationSec: 0,
-          pingCount: 0,
+          distanceMeters: null,
         ),
       );
     }
@@ -514,9 +514,10 @@ class BeaconScanController extends GetxController {
     // 1) only keep readings matching expected UUID/Major/Minor
     // 2) avgRssi = arithmetic mean of matched RSSI values
     // 3) durationSec = rounded matched dwell time using millisecond precision
-    // 4) pingCount = number of matching beacon callbacks observed
+    // 4) distanceMeters = best non-zero estimated distance observed during the scan
     scanning.value = true;
-    pingCount.value = 0;
+    distanceMeters.value = null;
+    final distanceReadings = <double>[];
     try {
       subscription = stream.listen(
         (result) {
@@ -531,7 +532,11 @@ class BeaconScanController extends GetxController {
             firstSeen ??= now;
             lastSeen = now;
             rssiReadings.add(beacon.rssi);
-            pingCount.value = rssiReadings.length;
+            if (beacon.accuracy > 0) {
+              distanceReadings.add(beacon.accuracy);
+              final bestDistance = distanceReadings.reduce(math.min);
+              distanceMeters.value = bestDistance;
+            }
           }
         },
         onError: (_) async {
@@ -553,13 +558,15 @@ class BeaconScanController extends GetxController {
 
       final avgRssi =
           rssiReadings.reduce((a, b) => a + b) / rssiReadings.length;
-      final pingTotal = rssiReadings.length;
       final duration = firstSeen != null && lastSeen != null
           ? math.max(
               1,
               (lastSeen!.difference(firstSeen!).inMilliseconds / 1000).round(),
             )
           : 0;
+      final bestDistance = distanceReadings.isEmpty
+          ? null
+          : distanceReadings.reduce(math.min);
 
       final evidence = BeaconEvidence(
         uuid: uuid,
@@ -567,11 +574,14 @@ class BeaconScanController extends GetxController {
         minor: minor,
         avgRssi: avgRssi,
         durationSec: duration,
-        pingCount: pingTotal,
+        distanceMeters: bestDistance,
       );
 
-      final enoughPresence =
-          duration >= stabilitySeconds || pingTotal >= minPingCount;
+      final closeEnough =
+          bestDistance != null &&
+          bestDistance > 0 &&
+          bestDistance <= maxDistanceMeters;
+      final enoughPresence = duration >= stabilitySeconds || closeEnough;
       final status = avgRssi < rssiThreshold
           ? BeaconScanStatus.weak
           : !enoughPresence
@@ -2442,18 +2452,13 @@ class TodayPage extends StatelessWidget {
   StudentSessionDto? _pickCurrentSession(List<StudentSessionDto> sessions) {
     final now = DateTime.now();
     for (final session in sessions) {
-      final start = _buildSessionTime(session.sessionDate, session.startTime);
-      final end = _buildSessionTime(session.sessionDate, session.endTime);
-      if (start == null || end == null) continue;
+      final openTime = _attendanceWindowOpensAt(session);
+      final closeTime = _attendanceWindowClosesAt(session);
+      if (openTime == null || closeTime == null || !closeTime.isAfter(openTime)) {
+        continue;
+      }
 
-      final openTime = start.subtract(
-        Duration(minutes: session.attendanceOpenMinutesBefore),
-      );
-      final closeTime = end.add(
-        Duration(minutes: session.attendanceCloseMinutesAfter),
-      );
-
-      if (now.isAfter(openTime) && now.isBefore(closeTime)) {
+      if (!now.isBefore(openTime) && !now.isAfter(closeTime)) {
         return session;
       }
     }
@@ -2706,7 +2711,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    final closeLabel = _attendanceWindowLabel(session);
+    final windowLabel = _attendanceWindowLabel(session);
 
     return Scaffold(
       body: SafeArea(
@@ -2806,7 +2811,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                                 ),
                               ),
                               Text(
-                                closeLabel,
+                                windowLabel,
                                 style: const TextStyle(
                                   color: Color(0xFF7D2908),
                                   fontSize: 20,
@@ -3019,7 +3024,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
   Timer? scanTimer;
 
   static const int beaconStabilityTargetSec = kBeaconUiStabilitySeconds;
-  static const int beaconPingTarget = kBeaconUiMinPingCount;
+  static const double beaconDistanceTargetMeters = kBeaconUiMaxDistanceMeters;
 
   @override
   void initState() {
@@ -3169,10 +3174,13 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
           final stability =
               result?.evidence.durationSec ??
               math.min(elapsedScanSec, beaconStabilityTargetSec);
-          final pingChecks = math.min(
-            result?.evidence.pingCount ?? beaconScanner.pingCount.value,
-            beaconPingTarget,
-          );
+          final measuredDistance =
+              result?.evidence.distanceMeters ?? beaconScanner.distanceMeters.value;
+          final displayDistance = measuredDistance == null
+              ? '--'
+              : measuredDistance.toStringAsFixed(1);
+          final distanceLimitLabel =
+              beaconDistanceTargetMeters.toStringAsFixed(0);
 
           return Column(
             children: [
@@ -3271,20 +3279,20 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                         ),
                         child: Row(
                           children: [
-                            const Expanded(
+                            Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    'Beacon Checks',
+                                  const Text(
+                                    'Distance Check',
                                     style: TextStyle(
                                       color: AppColors.textSecondary,
                                       fontSize: 17,
                                     ),
                                   ),
-                                  SizedBox(height: 4),
+                                  const SizedBox(height: 4),
                                   Text(
-                                    'Need 5 successful pings',
+                                    'Need to be within $distanceLimitLabel m',
                                     style: TextStyle(
                                       color: AppColors.textPrimary,
                                       fontWeight: FontWeight.w700,
@@ -3298,7 +3306,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
                                 Text(
-                                  '$pingChecks/$beaconPingTarget',
+                                  '$displayDistance m',
                                   style: const TextStyle(
                                     color: AppColors.primary,
                                     fontWeight: FontWeight.w700,
@@ -6243,6 +6251,12 @@ String _formatTo12Hour(String hhmm) {
   return '${hour12.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')} $suffix';
 }
 
+String _formatDateTimeTo12Hour(DateTime value) {
+  final suffix = value.hour >= 12 ? 'PM' : 'AM';
+  final hour12 = ((value.hour + 11) % 12) + 1;
+  return '${hour12.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')} $suffix';
+}
+
 String _formatHourMinute(String hhmm) {
   final parts = _formatTo12Hour(hhmm).split(' ');
   return parts.first;
@@ -6305,15 +6319,30 @@ String _formatDateReadable(String ymd) {
 }
 
 String _attendanceWindowLabel(StudentSessionDto session) {
-  final end = _buildSessionTime(session.sessionDate, session.endTime);
-  if (end == null) return 'Open now';
+  final open = _attendanceWindowOpensAt(session);
+  final close = _attendanceWindowClosesAt(session);
+  if (open == null || close == null) {
+    return 'Attendance window unavailable';
+  }
+  if (!close.isAfter(open)) {
+    return 'Attendance window misconfigured';
+  }
 
-  final close = end.add(Duration(minutes: session.attendanceCloseMinutesAfter));
-  final hh = close.hour;
-  final mm = close.minute;
-  final suffix = hh >= 12 ? 'PM' : 'AM';
-  final hour12 = ((hh + 11) % 12) + 1;
-  return 'Open until ${hour12.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} $suffix';
+  return '${_formatDateTimeTo12Hour(open)} - ${_formatDateTimeTo12Hour(close)}';
+}
+
+DateTime? _attendanceWindowOpensAt(StudentSessionDto session) {
+  final start = _buildSessionTime(session.sessionDate, session.startTime);
+  if (start == null) return null;
+
+  return start.add(Duration(minutes: session.attendanceOpenMinutesBefore));
+}
+
+DateTime? _attendanceWindowClosesAt(StudentSessionDto session) {
+  final end = _buildSessionTime(session.sessionDate, session.endTime);
+  if (end == null) return null;
+
+  return end.subtract(Duration(minutes: session.attendanceCloseMinutesAfter));
 }
 
 String _previewBeaconTitle({
@@ -6431,7 +6460,7 @@ String _attendanceBeaconMessage({
     case BeaconScanStatus.weak:
       return 'The correct beacon was found, but the signal is too weak right now.';
     case BeaconScanStatus.unstable:
-      return 'The correct beacon was found, but we need a few more successful beacon checks.';
+      return 'The correct beacon was found, but you are still too far away from it.';
     case BeaconScanStatus.matched:
       return 'Hall beacon identity and proximity checks passed.';
     case null:
@@ -6451,7 +6480,7 @@ String _attendanceBeaconBadgeLabel({
     case BeaconScanStatus.weak:
       return 'Weak signal';
     case BeaconScanStatus.unstable:
-      return 'More checks';
+      return 'Move closer';
     case BeaconScanStatus.notFound:
       return 'Not found';
     case BeaconScanStatus.bluetoothOff:
@@ -6533,7 +6562,7 @@ String _attendanceBeaconFooter({
     case BeaconScanStatus.weak:
       return 'Move closer to the hall beacon and scan again.';
     case BeaconScanStatus.unstable:
-      return 'Stay near the beacon until 5 successful checks are recorded, then try again.';
+      return 'Move to within 10 meters of the hall beacon, then scan again.';
     case BeaconScanStatus.notFound:
       return 'Please stand inside the lecture hall and retry the scan.';
     case BeaconScanStatus.bluetoothOff:
@@ -6558,7 +6587,7 @@ String _attendanceRejectMessage(String? reasonCode) {
     case 'BEACON_WEAK':
       return 'The correct hall beacon was found, but the signal was too weak.';
     case 'BEACON_UNSTABLE':
-      return 'The correct hall beacon was found, but not enough successful proximity checks were recorded.';
+      return 'The correct hall beacon was found, but you were not close enough to it.';
     case 'FACE_FAIL':
       return 'Face verification did not pass.';
     case 'OUTSIDE_WINDOW':

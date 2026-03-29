@@ -9,11 +9,11 @@ void main() {
       minor: 2,
       avgRssi: -66.5,
       durationSec: 10,
-      pingCount: 5,
+      distanceMeters: 4.25,
     );
 
     expect(beacon.toJson()['major'], 1);
     expect(beacon.toJson()['durationSec'], 10);
-    expect(beacon.toJson()['pingCount'], 5);
+    expect(beacon.toJson()['distanceMeters'], 4.25);
   });
 }
