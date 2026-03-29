@@ -100,6 +100,11 @@ public class FlutterBeaconPlugin implements FlutterPlugin, ActivityAware, Method
       beaconManager.getBeaconParsers().clear();
       beaconManager.getBeaconParsers().add(iBeaconLayout);
     }
+    // This app only ranges beacons while the user is actively on-screen.
+    // Disable Android 8+ background scan jobs so AltBeacon uses the bound
+    // foreground service path instead of PendingIntent-based background scans.
+    beaconManager.setEnableScheduledScanJobs(false);
+    beaconManager.setIntentScanningStrategyEnabled(false);
 
     platform = new FlutterPlatform(activity);
     beaconScanner = new FlutterBeaconScanner(this, activity);

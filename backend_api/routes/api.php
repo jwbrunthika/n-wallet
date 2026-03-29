@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\V1\HealthController;
 use App\Http\Controllers\Api\V1\StudentAttendanceController;
 use App\Http\Controllers\Api\V1\StudentAuthController;
 use App\Http\Controllers\Api\V1\StudentEnrollmentController;
+use App\Http\Controllers\Api\V1\StudentIdentityController;
 use App\Http\Controllers\Api\V1\StudentProfileController;
 use App\Http\Controllers\Api\V1\StudentSessionController;
 use App\Http\Controllers\Api\V1\TimetableImportController;
@@ -33,6 +34,7 @@ Route::prefix('v1')->group(function (): void {
 
     Route::middleware(['auth:student_api', 'token.type:student'])->prefix('student')->group(function (): void {
         Route::get('/me', [StudentProfileController::class, 'me']);
+        Route::post('/identity/verify', [StudentIdentityController::class, 'verify']);
 
         Route::prefix('enrollment')->group(function (): void {
             Route::post('/upload', [StudentEnrollmentController::class, 'upload']);

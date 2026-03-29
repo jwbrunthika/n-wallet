@@ -45,6 +45,17 @@ class NWalletApi {
     return _extractDataMap(response.data);
   }
 
+  Future<Map<String, dynamic>> verifyStudentIdentity(
+    List<MultipartFile> frames,
+  ) async {
+    final formData = FormData.fromMap({'faceFrames[]': frames});
+    final response = await _dio.post(
+      '/student/identity/verify',
+      data: formData,
+    );
+    return _extractDataMap(response.data);
+  }
+
   Future<List<StudentSessionDto>> studentSessionsToday(String date) async {
     final response = await _dio.get(
       '/student/sessions/today',

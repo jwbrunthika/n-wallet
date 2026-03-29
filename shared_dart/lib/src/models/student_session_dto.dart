@@ -10,6 +10,7 @@ class StudentSessionDto extends Equatable {
     required this.moduleCode,
     required this.moduleName,
     required this.hallId,
+    required this.hallName,
     required this.batch,
     required this.deliveryMode,
     required this.lecturerEmail,
@@ -26,6 +27,7 @@ class StudentSessionDto extends Equatable {
   final String moduleCode;
   final String moduleName;
   final String hallId;
+  final String hallName;
   final String batch;
   final String deliveryMode;
   final String lecturerEmail;
@@ -43,6 +45,7 @@ class StudentSessionDto extends Equatable {
       moduleCode: json['moduleCode'] as String? ?? '',
       moduleName: json['moduleName'] as String? ?? '',
       hallId: json['hallId'] as String? ?? '',
+      hallName: json['hallName'] as String? ?? '',
       batch: json['batch'] as String? ?? '',
       deliveryMode: json['deliveryMode'] as String? ?? 'BOTH',
       lecturerEmail: json['lecturerEmail'] as String? ?? '',
@@ -64,6 +67,7 @@ class StudentSessionDto extends Equatable {
     moduleCode,
     moduleName,
     hallId,
+    hallName,
     batch,
     deliveryMode,
     lecturerEmail,

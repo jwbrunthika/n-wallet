@@ -2,7 +2,7 @@
 
 N Wallet is a student attendance system that accepts attendance **only** when:
 1. Face identity verification passes (server-side embeddings)
-2. The student is near the correct iBeacon (DX-CP33-V1.0) for the lecture hall
+2. The student is near the correct lecture hall iBeacon
 
 ## Stack
 - Mobile app: Flutter + GetX
@@ -23,6 +23,7 @@ N Wallet is a student attendance system that accepts attendance **only** when:
 - `shared_dart/` shared API DTO/client package
 - `sample-data/timetable_sample.csv`
 - `scripts/bootstrap_backend.sh`
+- `scripts/rebuild_backend.sh`
 
 ## Simple Deployment (VPS)
 1. Start services:
@@ -33,6 +34,11 @@ docker compose up -d --build
 2. Bootstrap Laravel (migrations + seed):
 ```bash
 ./scripts/bootstrap_backend.sh
+```
+
+If you changed anything under `backend_api/`, rebuild the backend container so the live API picks up the new PHP source:
+```bash
+./scripts/rebuild_backend.sh
 ```
 
 3. API health check:
@@ -49,6 +55,11 @@ docker compose up -d --build
 2. Run migrations/seed:
 ```bash
 docker compose exec backend_php php artisan migrate --seed --force
+```
+
+If you edited Laravel code under `backend_api/`, run:
+```bash
+./scripts/rebuild_backend.sh
 ```
 
 3. Admin web:
@@ -77,11 +88,11 @@ flutter run --dart-define=API_BASE_URL=http://51.255.201.31:18082/api/v1
 - `beaconStabilitySeconds = 8`
 
 ### SMTP defaults in `.env.docker`
-- Host: `smtp.gmail.com`
-- Port: `587`
-- Username: `nwallet.2002@gmail.com`
-- Password: `orvuywcdwwmcktxw` (Gmail App Password)
-- Encryption: `tls`
+- Host: `mail.nodecmb.com`
+- Port: `465`
+- Username: `nwallet@nodecmb.com`
+- Password: configured in `.env.docker`
+- Encryption: `ssl`
 
 ## Security Notes
 - Passwords are hashed (`Hash::make`) for admins.

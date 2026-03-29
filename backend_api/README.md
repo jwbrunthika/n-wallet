@@ -1,7 +1,7 @@
 # N Wallet Backend API (Laravel + MongoDB)
 
 ## Key Features
-- Student OTP authentication (email + dev-log fallback)
+- Student OTP authentication (email; dev log only when `OTP_DEV_MODE=true`)
 - Admin JWT authentication
 - Face enrollment image upload + encrypted face template storage
 - Attendance submission with face score and beacon evidence checks

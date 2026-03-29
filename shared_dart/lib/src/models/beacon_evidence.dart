@@ -5,6 +5,7 @@ class BeaconEvidence {
     required this.minor,
     required this.avgRssi,
     required this.durationSec,
+    this.pingCount = 0,
   });
 
   final String uuid;
@@ -12,6 +13,7 @@ class BeaconEvidence {
   final int minor;
   final double avgRssi;
   final int durationSec;
+  final int pingCount;
 
   Map<String, dynamic> toJson() {
     return {
@@ -20,6 +22,7 @@ class BeaconEvidence {
       'minor': minor,
       'avgRssi': avgRssi,
       'durationSec': durationSec,
+      'pingCount': pingCount,
     };
   }
 }

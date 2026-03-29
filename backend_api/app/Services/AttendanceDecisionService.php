@@ -8,16 +8,13 @@ use App\Models\Beacon;
 use App\Models\LectureSession;
 use App\Models\Student;
 use App\Services\Attendance\BeaconValidationService;
-use App\Services\Face\FaceEmbeddingClient;
 use App\Support\ApiException;
 use Carbon\Carbon;
-use Illuminate\Http\UploadedFile;
 
 class AttendanceDecisionService
 {
     public function __construct(
-        private readonly FaceEmbeddingClient $faceEmbeddingClient,
-        private readonly EmbeddingCryptoService $embeddingCryptoService,
+        private readonly IdentityVerificationService $identityVerificationService,
         private readonly BeaconValidationService $beaconValidationService,
         private readonly AcademicProfileService $academicProfileService,
     ) {
@@ -25,7 +22,7 @@ class AttendanceDecisionService
 
     /**
      * @param array<int, UploadedFile> $faceFrames
-     * @param array{uuid:string,major:int,minor:int,avgRssi:float,durationSec:int} $beaconEvidence
+     * @param array{uuid:string,major:int,minor:int,avgRssi:float,durationSec:int,pingCount?:int} $beaconEvidence
      */
     public function submit(Student $student, string $sessionId, array $faceFrames, array $beaconEvidence): array
     {
@@ -65,8 +62,9 @@ class AttendanceDecisionService
         $faceThreshold = (float) ($setting->faceMatchThreshold ?? env('FACE_MATCH_THRESHOLD', 0.55));
         $beaconRssiThreshold = (float) ($setting->beaconRssiThreshold ?? env('BEACON_RSSI_THRESHOLD', -70));
         $beaconStabilitySeconds = (int) ($setting->beaconStabilitySeconds ?? env('BEACON_STABILITY_SECONDS', 8));
+        $beaconMinPingCount = (int) env('BEACON_MIN_PINGS', 5);
 
-        $bestFaceScore = $this->bestFaceScore($student, $faceFrames);
+        $bestFaceScore = $this->identityVerificationService->bestFaceScore($student, $faceFrames);
         $facePass = $bestFaceScore >= $faceThreshold;
 
         $expectedBeacon = Beacon::query()
@@ -90,7 +88,8 @@ class AttendanceDecisionService
             $expectedBeacon,
             $beaconEvidence,
             $beaconRssiThreshold,
-            $beaconStabilitySeconds
+            $beaconStabilitySeconds,
+            $beaconMinPingCount
         );
 
         if (! $facePass) {
@@ -138,57 +137,6 @@ class AttendanceDecisionService
         $now = Carbon::now($timezone);
 
         return $now->between($windowOpen, $windowClose);
-    }
-
-    /**
-     * @param array<int, UploadedFile> $faceFrames
-     */
-    private function bestFaceScore(Student $student, array $faceFrames): float
-    {
-        if (count($faceFrames) < 1 || count($faceFrames) > 3) {
-            throw new ApiException('INVALID_FACE_FRAMES', 'Face frames must contain 1 to 3 images.', 422);
-        }
-
-        $template = $this->embeddingCryptoService->decryptVector((string) $student->faceTemplate['encryptedVector']);
-
-        $best = -1.0;
-
-        foreach ($faceFrames as $frame) {
-            if (! $frame instanceof UploadedFile) {
-                throw new ApiException('INVALID_FACE_FRAME', 'Face frame payload is invalid.', 422);
-            }
-
-            $faceData = $this->faceEmbeddingClient->fromImagePath($frame->getRealPath(), $frame->getClientOriginalName() ?: 'frame.jpg');
-            $score = $this->cosineSimilarity($template, $faceData['embedding']);
-            $best = max($best, $score);
-        }
-
-        return max($best, 0.0);
-    }
-
-    /**
-     * @param array<int, float> $left
-     * @param array<int, float> $right
-     */
-    private function cosineSimilarity(array $left, array $right): float
-    {
-        $dot = 0.0;
-        $leftNorm = 0.0;
-        $rightNorm = 0.0;
-
-        for ($i = 0; $i < 512; $i++) {
-            $l = (float) ($left[$i] ?? 0.0);
-            $r = (float) ($right[$i] ?? 0.0);
-            $dot += $l * $r;
-            $leftNorm += $l * $l;
-            $rightNorm += $r * $r;
-        }
-
-        if ($leftNorm <= 0 || $rightNorm <= 0) {
-            return 0.0;
-        }
-
-        return $dot / (sqrt($leftNorm) * sqrt($rightNorm));
     }
 
     private function persistRejected(string $studentEmail, string $sessionId, float $faceScore, float $beaconAvgRssi, string $reasonCode): array

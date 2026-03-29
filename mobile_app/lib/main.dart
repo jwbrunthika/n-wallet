@@ -3,11 +3,14 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
+import 'package:camera_android/camera_android.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show DeviceOrientation, SystemChrome;
 import 'package:flutter_beacon/flutter_beacon.dart';
 import 'package:get/get.dart' hide MultipartFile;
 import 'package:get_storage/get_storage.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_dart/shared_dart.dart';
 
@@ -17,6 +20,7 @@ const String kApiBaseUrl = String.fromEnvironment(
 );
 
 List<CameraDescription> gCameras = <CameraDescription>[];
+String? gCameraLoadError;
 
 class AppColors {
   static const Color primary = Color(0xFF14522D);
@@ -31,13 +35,43 @@ class AppColors {
   static const Color muted = Color(0xFFE8EEEA);
 }
 
+Future<String?> _ensureCamerasLoaded() async {
+  if (gCameras.isNotEmpty) {
+    return null;
+  }
+
+  try {
+    gCameras = await availableCameras();
+    gCameraLoadError = null;
+  } catch (e) {
+    gCameraLoadError = '$e';
+    return 'Unable to load camera: $e';
+  }
+
+  if (gCameras.isEmpty) {
+    return gCameraLoadError == null
+        ? 'No camera found on this device.'
+        : 'No camera found on this device. Last error: $gCameraLoadError';
+  }
+
+  return null;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations(<DeviceOrientation>[
+    DeviceOrientation.portraitUp,
+  ]);
+  if (Platform.isAndroid) {
+    AndroidCamera.registerWith();
+  }
   await GetStorage.init();
   try {
     gCameras = await availableCameras();
-  } catch (_) {
+    gCameraLoadError = null;
+  } catch (e) {
     gCameras = <CameraDescription>[];
+    gCameraLoadError = '$e';
   }
 
   Get.put(StudentAuthController());
@@ -87,10 +121,19 @@ class StudentApp extends StatelessWidget {
         GetPage(name: '/login', page: () => const LoginPage()),
         GetPage(name: '/otp', page: () => const OtpPage()),
         GetPage(name: '/permissions', page: () => const PermissionPage()),
+        GetPage(name: '/face-unlock', page: () => const FaceUnlockPage()),
+        GetPage(
+          name: '/identity-capture',
+          page: () => const IdentityAutoCapturePage(),
+        ),
         GetPage(name: '/enroll', page: () => const EnrollmentWizardPage()),
         GetPage(name: '/home', page: () => const HomePage()),
         GetPage(name: '/session', page: () => const SessionDetailPage()),
         GetPage(name: '/attendance', page: () => const AttendanceFlowPage()),
+        GetPage(
+          name: '/enrollment-capture',
+          page: () => const EnrollmentAutoCapturePage(),
+        ),
         GetPage(name: '/capture', page: () => const CaptureFacePage()),
         GetPage(
           name: '/attendance-result',
@@ -116,6 +159,9 @@ class StudentAuthController extends GetxController {
   final Rxn<DateTime> otpExpiresAt = Rxn<DateTime>();
   final Rxn<DateTime> otpResendAvailableAt = Rxn<DateTime>();
   final RxBool loading = false.obs;
+  final RxBool requiresFaceUnlock = false.obs;
+
+  bool _restoredSession = false;
 
   bool get isLoggedIn => (token.value ?? '').isNotEmpty;
 
@@ -126,6 +172,7 @@ class StudentAuthController extends GetxController {
 
     final savedToken = _storage.read<String>('student_token');
     if (savedToken != null && savedToken.isNotEmpty) {
+      _restoredSession = true;
       token.value = savedToken;
       api.setToken(savedToken);
       email.value = _storage.read<String>('student_email');
@@ -134,6 +181,7 @@ class StudentAuthController extends GetxController {
       courseCode.value = _storage.read<String>('student_course_code');
       batch.value = _storage.read<String>('student_batch');
       studyMode.value = _storage.read<String>('student_study_mode');
+      requiresFaceUnlock.value = enrollmentStatus.value == 'ENROLLED';
     }
   }
 
@@ -191,6 +239,8 @@ class StudentAuthController extends GetxController {
       courseCode.value = student['courseCode'] as String?;
       batch.value = student['batch'] as String?;
       studyMode.value = student['studyMode'] as String?;
+      _restoredSession = false;
+      requiresFaceUnlock.value = false;
 
       _storage.write('student_token', accessToken);
       _storage.write('student_email', email.value ?? '');
@@ -218,6 +268,8 @@ class StudentAuthController extends GetxController {
       courseCode.value = me['courseCode'] as String?;
       batch.value = me['batch'] as String?;
       studyMode.value = me['studyMode'] as String?;
+      requiresFaceUnlock.value =
+          _restoredSession && enrollmentStatus.value == 'ENROLLED';
       _storage.write('student_email', email.value ?? '');
       _storage.write('enrollment_status', enrollmentStatus.value);
       _storage.write('student_course_code', courseCode.value);
@@ -233,7 +285,13 @@ class StudentAuthController extends GetxController {
     _storage.write('enrollment_status', status);
   }
 
+  void markFaceUnlockVerified() {
+    _restoredSession = false;
+    requiresFaceUnlock.value = false;
+  }
+
   void logout() {
+    _restoredSession = false;
     token.value = null;
     email.value = null;
     enrollmentStatus.value = 'NOT_ENROLLED';
@@ -243,6 +301,7 @@ class StudentAuthController extends GetxController {
     otpRequestId.value = null;
     otpExpiresAt.value = null;
     otpResendAvailableAt.value = null;
+    requiresFaceUnlock.value = false;
     api.setToken(null);
 
     _storage.remove('student_token');
@@ -340,59 +399,124 @@ class StudentDataController extends GetxController {
   }
 }
 
+const double kBeaconUiRssiThreshold = -70;
+const int kBeaconUiStabilitySeconds = 8;
+const int kBeaconUiMinPingCount = 5;
+const double kBeaconPreviewRssiThreshold = -90;
+const int kBeaconPreviewStabilitySeconds = 1;
+
+enum BeaconScanStatus {
+  noMapping,
+  bluetoothOff,
+  locationPermissionDenied,
+  locationServicesOff,
+  scanFailed,
+  notFound,
+  weak,
+  unstable,
+  matched,
+}
+
+class BeaconScanResult {
+  const BeaconScanResult({required this.status, required this.evidence});
+
+  final BeaconScanStatus status;
+  final BeaconEvidence evidence;
+
+  bool get matched => status == BeaconScanStatus.matched;
+  bool get detected => evidence.avgRssi > -999;
+}
+
 class BeaconScanController extends GetxController {
   final RxBool scanning = false.obs;
+  final RxInt pingCount = 0.obs;
 
-  Future<BeaconEvidence> scanEvidence({
+  Future<BeaconScanResult> scanEvidence({
     required String uuid,
     required int major,
     required int minor,
     int scanSeconds = 10,
+    double rssiThreshold = kBeaconUiRssiThreshold,
+    int stabilitySeconds = kBeaconUiStabilitySeconds,
+    int minPingCount = kBeaconUiMinPingCount,
   }) async {
-    if (uuid.trim().isEmpty) {
-      return BeaconEvidence(
-        uuid: uuid,
-        major: major,
-        minor: minor,
-        avgRssi: -999,
-        durationSec: 0,
+    BeaconScanResult emptyResult(BeaconScanStatus status) {
+      return BeaconScanResult(
+        status: status,
+        evidence: BeaconEvidence(
+          uuid: uuid,
+          major: major,
+          minor: minor,
+          avgRssi: -999,
+          durationSec: 0,
+          pingCount: 0,
+        ),
       );
+    }
+
+    if (uuid.trim().isEmpty) {
+      return emptyResult(BeaconScanStatus.noMapping);
     }
 
     try {
+      final bluetoothState = await flutterBeacon.bluetoothState;
+      if (bluetoothState != BluetoothState.stateOn) {
+        return emptyResult(BeaconScanStatus.bluetoothOff);
+      }
+
+      final hasLocationPermission =
+          await Permission.locationWhenInUse.isGranted;
+      if (!hasLocationPermission) {
+        return emptyResult(BeaconScanStatus.locationPermissionDenied);
+      }
+
+      final authorizationStatus = await flutterBeacon.authorizationStatus;
+      final locationAuthorized = Platform.isIOS
+          ? authorizationStatus == AuthorizationStatus.whenInUse ||
+                authorizationStatus == AuthorizationStatus.always
+          : authorizationStatus == AuthorizationStatus.allowed;
+      if (!locationAuthorized) {
+        return emptyResult(BeaconScanStatus.locationPermissionDenied);
+      }
+
+      final locationServicesEnabled =
+          await flutterBeacon.checkLocationServicesIfEnabled;
+      if (!locationServicesEnabled) {
+        return emptyResult(BeaconScanStatus.locationServicesOff);
+      }
+
       await flutterBeacon.initializeScanning;
     } catch (_) {
-      return BeaconEvidence(
-        uuid: uuid,
-        major: major,
-        minor: minor,
-        avgRssi: -999,
-        durationSec: 0,
-      );
+      return emptyResult(BeaconScanStatus.scanFailed);
     }
 
-    final region = Region(identifier: 'nwallet-region');
+    final region = Region(
+      identifier: 'nwallet-${uuid.toLowerCase()}',
+      proximityUUID: uuid,
+    );
     final stream = flutterBeacon.ranging([region]);
 
     final rssiReadings = <int>[];
     DateTime? firstSeen;
     DateTime? lastSeen;
     StreamSubscription<RangingResult>? subscription;
-    final completer = Completer<BeaconEvidence>();
+    final completer = Completer<BeaconScanResult>();
 
-    void safeComplete(BeaconEvidence evidence) {
+    void safeComplete(BeaconScanResult result) {
       if (completer.isCompleted) {
         return;
       }
       scanning.value = false;
-      completer.complete(evidence);
+      completer.complete(result);
     }
 
     // Beacon evidence summary logic:
     // 1) only keep readings matching expected UUID/Major/Minor
     // 2) avgRssi = arithmetic mean of matched RSSI values
-    // 3) durationSec = time between first and last matched sightings
+    // 3) durationSec = rounded matched dwell time using millisecond precision
+    // 4) pingCount = number of matching beacon callbacks observed
     scanning.value = true;
+    pingCount.value = 0;
     try {
       subscription = stream.listen(
         (result) {
@@ -407,64 +531,54 @@ class BeaconScanController extends GetxController {
             firstSeen ??= now;
             lastSeen = now;
             rssiReadings.add(beacon.rssi);
+            pingCount.value = rssiReadings.length;
           }
         },
         onError: (_) async {
           await subscription?.cancel();
-          safeComplete(
-            BeaconEvidence(
-              uuid: uuid,
-              major: major,
-              minor: minor,
-              avgRssi: -999,
-              durationSec: 0,
-            ),
-          );
+          safeComplete(emptyResult(BeaconScanStatus.scanFailed));
         },
       );
     } catch (_) {
       await subscription?.cancel();
-      safeComplete(
-        BeaconEvidence(
-          uuid: uuid,
-          major: major,
-          minor: minor,
-          avgRssi: -999,
-          durationSec: 0,
-        ),
-      );
+      safeComplete(emptyResult(BeaconScanStatus.scanFailed));
     }
 
     Future<void>.delayed(Duration(seconds: scanSeconds), () async {
       await subscription?.cancel();
       if (rssiReadings.isEmpty) {
-        safeComplete(
-          BeaconEvidence(
-            uuid: uuid,
-            major: major,
-            minor: minor,
-            avgRssi: -999,
-            durationSec: 0,
-          ),
-        );
+        safeComplete(emptyResult(BeaconScanStatus.notFound));
         return;
       }
 
       final avgRssi =
           rssiReadings.reduce((a, b) => a + b) / rssiReadings.length;
+      final pingTotal = rssiReadings.length;
       final duration = firstSeen != null && lastSeen != null
-          ? math.max(0, lastSeen!.difference(firstSeen!).inSeconds)
+          ? math.max(
+              1,
+              (lastSeen!.difference(firstSeen!).inMilliseconds / 1000).round(),
+            )
           : 0;
 
-      safeComplete(
-        BeaconEvidence(
-          uuid: uuid,
-          major: major,
-          minor: minor,
-          avgRssi: avgRssi,
-          durationSec: duration,
-        ),
+      final evidence = BeaconEvidence(
+        uuid: uuid,
+        major: major,
+        minor: minor,
+        avgRssi: avgRssi,
+        durationSec: duration,
+        pingCount: pingTotal,
       );
+
+      final enoughPresence =
+          duration >= stabilitySeconds || pingTotal >= minPingCount;
+      final status = avgRssi < rssiThreshold
+          ? BeaconScanStatus.weak
+          : !enoughPresence
+          ? BeaconScanStatus.unstable
+          : BeaconScanStatus.matched;
+
+      safeComplete(BeaconScanResult(status: status, evidence: evidence));
     });
 
     return completer.future;
@@ -1074,7 +1188,11 @@ class _PermissionPageState extends State<PermissionPage> {
     }
 
     if (auth.enrollmentStatus.value == 'ENROLLED') {
-      Get.offAllNamed('/home');
+      if (auth.requiresFaceUnlock.value) {
+        Get.offAllNamed('/face-unlock');
+      } else {
+        Get.offAllNamed('/home');
+      }
     } else {
       Get.offAllNamed('/enroll');
     }
@@ -1355,6 +1473,148 @@ class _PermissionPageState extends State<PermissionPage> {
   }
 }
 
+class FaceUnlockPage extends StatefulWidget {
+  const FaceUnlockPage({super.key});
+
+  @override
+  State<FaceUnlockPage> createState() => _FaceUnlockPageState();
+}
+
+class _FaceUnlockPageState extends State<FaceUnlockPage> {
+  final auth = Get.find<StudentAuthController>();
+
+  bool verifying = false;
+
+  Future<void> _captureAndVerify() async {
+    final result = await Get.toNamed('/identity-capture') as String?;
+    if (result == null || result.isEmpty) return;
+
+    setState(() => verifying = true);
+    try {
+      final frame = MultipartFile.fromFileSync(
+        result,
+        filename: result.split('/').last,
+      );
+
+      await auth.api.verifyStudentIdentity([frame]);
+      auth.markFaceUnlockVerified();
+      Get.offAllNamed('/home');
+      Get.snackbar(
+        'Identity verified',
+        'Face recognition successful.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    } on DioException catch (error) {
+      Get.snackbar(
+        'Verification failed',
+        _extractDioError(error),
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => verifying = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+          child: Column(
+            children: [
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: verifying ? null : auth.logout,
+                  child: const Text('Log out'),
+                ),
+              ),
+              const Spacer(),
+              Container(
+                width: 132,
+                height: 132,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE6F3C9),
+                  borderRadius: BorderRadius.circular(66),
+                ),
+                child: const Icon(
+                  Icons.face,
+                  color: AppColors.primary,
+                  size: 64,
+                ),
+              ),
+              const SizedBox(height: 28),
+              const Text(
+                'Verify Your Identity',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w700,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Welcome back${auth.email.value == null ? '' : ', ${_nameFromEmail(auth.email.value)}'}. '
+                'Use a quick face scan before entering your dashboard.',
+                style: const TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 17,
+                  height: 1.5,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 22),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.shield_outlined, color: AppColors.primary),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'This verifies that the enrolled student is the person opening the app. '
+                        'Your stored face template is matched on the server using the same secure pipeline used for attendance.',
+                        style: TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 16,
+                          height: 1.45,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Spacer(),
+              PrimaryActionButton(
+                text: 'Scan Face',
+                busy: verifying,
+                onPressed: verifying ? null : _captureAndVerify,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Use good lighting and keep your full face centered in the frame.',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 15),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class EnrollmentWizardPage extends StatefulWidget {
   const EnrollmentWizardPage({super.key});
 
@@ -1367,23 +1627,26 @@ class _EnrollmentWizardPageState extends State<EnrollmentWizardPage> {
 
   final List<String?> imagePaths = <String?>[null, null, null];
   final List<String> stepNames = <String>[
-    'CAPTURE FRONT',
-    'CAPTURE LEFT',
-    'CAPTURE RIGHT',
+    'LOOK FORWARD',
+    'TURN ONE SIDE',
+    'TURN OTHER SIDE',
   ];
 
   int activeStep = 0;
   bool submitting = false;
 
-  Future<void> _captureAt(int index) async {
-    final result = await Get.toNamed('/capture') as String?;
-    if (result == null) return;
+  Future<void> _startGuidedCapture() async {
+    final result = await Get.toNamed('/enrollment-capture');
+    if (result is! List) return;
+
+    final paths = result.whereType<String>().toList();
+    if (paths.length != 3) return;
 
     setState(() {
-      imagePaths[index] = result;
-      if (index < 2) {
-        activeStep = index + 1;
+      for (var i = 0; i < imagePaths.length; i++) {
+        imagePaths[i] = paths[i];
       }
+      activeStep = 0;
     });
   }
 
@@ -1518,7 +1781,7 @@ class _EnrollmentWizardPageState extends State<EnrollmentWizardPage> {
 
   Future<void> _submit() async {
     if (imagePaths.any((path) => path == null)) {
-      Get.snackbar('Enrollment', 'Capture all 3 images first.');
+      Get.snackbar('Enrollment', 'Complete the guided face scan first.');
       return;
     }
 
@@ -1632,7 +1895,7 @@ class _EnrollmentWizardPageState extends State<EnrollmentWizardPage> {
                   ),
                   const SizedBox(height: 16),
                   const Text(
-                    'Position your face within the circle. Ensure you are in a well-lit environment.',
+                    'Start one guided scan. The app will detect your face and capture three angles automatically.',
                     style: TextStyle(
                       color: AppColors.textSecondary,
                       fontSize: 17,
@@ -1695,47 +1958,22 @@ class _EnrollmentWizardPageState extends State<EnrollmentWizardPage> {
                     }),
                   ),
                   const SizedBox(height: 18),
-                  SizedBox(
-                    width: 104,
-                    height: 104,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        Container(
-                          width: 104,
-                          height: 104,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: AppColors.primary.withValues(alpha: 0.2),
-                              width: 5,
-                            ),
-                          ),
-                        ),
-                        Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            onTap: submitting
-                                ? null
-                                : () => _captureAt(activeStep),
-                            borderRadius: BorderRadius.circular(999),
-                            child: Container(
-                              width: 80,
-                              height: 80,
-                              decoration: const BoxDecoration(
-                                color: AppColors.primary,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.photo_camera,
-                                color: Colors.white,
-                                size: 38,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
+                  PrimaryActionButton(
+                    text: capturedCount == 3
+                        ? 'Retake Guided Scan'
+                        : 'Start Guided Scan',
+                    icon: Icons.videocam_rounded,
+                    onPressed: submitting ? null : _startGuidedCapture,
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Look forward first, then slowly turn to one side and the other when prompted.',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 15,
+                      height: 1.45,
                     ),
+                    textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 16),
                   const Row(
@@ -2305,7 +2543,7 @@ class _CurrentSessionCard extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  _displayHall(session.hallId),
+                  _displayHall(session.hallName, session.hallId),
                   style: const TextStyle(
                     color: AppColors.textPrimary,
                     fontWeight: FontWeight.w600,
@@ -2427,7 +2665,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
 
   late final StudentSessionDto session;
   Map<String, dynamic>? expectedBeacon;
-  BeaconEvidence? beaconPreview;
+  BeaconScanResult? beaconPreview;
   bool loading = true;
 
   @override
@@ -2452,6 +2690,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
           major: (expectedBeacon!['major'] as num?)?.toInt() ?? 0,
           minor: (expectedBeacon!['minor'] as num?)?.toInt() ?? 0,
           scanSeconds: 4,
+          rssiThreshold: kBeaconPreviewRssiThreshold,
+          stabilitySeconds: kBeaconPreviewStabilitySeconds,
         );
         beaconPreview = preview;
       }
@@ -2603,41 +2843,12 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                           _detailTile(
                             icon: Icons.location_on,
                             title: 'Location',
-                            value: _displayHall(session.hallId),
+                            value: _displayHall(
+                              session.hallName,
+                              session.hallId,
+                            ),
                           ),
                         ],
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    Container(
-                      width: double.infinity,
-                      height: 180,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(26),
-                        gradient: const LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [Color(0xFFBFC4CC), Color(0xFF7D848E)],
-                        ),
-                      ),
-                      child: const Align(
-                        alignment: Alignment.bottomLeft,
-                        child: Padding(
-                          padding: EdgeInsets.all(16),
-                          child: Row(
-                            children: [
-                              Icon(Icons.near_me, color: Colors.white),
-                              SizedBox(width: 8),
-                              Text(
-                                'Get Directions',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
                       ),
                     ),
                     const SizedBox(height: 18),
@@ -2676,10 +2887,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
 
   Widget _beaconStatusCard() {
     final hasMapping = expectedBeacon != null;
-    final hasSignal = beaconPreview != null && beaconPreview!.durationSec > 0;
-    final strength = hasSignal
-        ? _beaconStrengthLabel(beaconPreview!.avgRssi)
-        : 'Not detected';
+    final hasSignal = beaconPreview?.detected ?? false;
+    final status = beaconPreview?.status;
 
     return Container(
       width: double.infinity,
@@ -2707,11 +2916,9 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  hasMapping
-                      ? 'Hall Beacon ${hasSignal ? 'Detected' : 'Mapped'}'
-                      : 'No Beacon Mapping',
+                  _previewBeaconTitle(hasMapping: hasMapping, status: status),
                   style: TextStyle(
-                    color: hasMapping
+                    color: hasSignal
                         ? const Color(0xFF0D6A43)
                         : AppColors.textSecondary,
                     fontWeight: FontWeight.w700,
@@ -2720,11 +2927,14 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  hasMapping
-                      ? 'Signal Strength: $strength'
-                      : 'Admin has not mapped an active beacon for this hall.',
-                  style: const TextStyle(
-                    color: Color(0xFF0D6A43),
+                  _previewBeaconMessage(
+                    hasMapping: hasMapping,
+                    result: beaconPreview,
+                  ),
+                  style: TextStyle(
+                    color: hasSignal
+                        ? const Color(0xFF0D6A43)
+                        : AppColors.textSecondary,
                     fontSize: 18,
                   ),
                 ),
@@ -2802,13 +3012,14 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
   late final StudentSessionDto session;
   Map<String, dynamic>? expectedBeacon;
 
-  BeaconEvidence? evidence;
+  BeaconScanResult? beaconResult;
   bool loadingDetail = true;
   bool submitting = false;
   int elapsedScanSec = 0;
   Timer? scanTimer;
 
-  static const int beaconStabilityTargetSec = 8;
+  static const int beaconStabilityTargetSec = kBeaconUiStabilitySeconds;
+  static const int beaconPingTarget = kBeaconUiMinPingCount;
 
   @override
   void initState() {
@@ -2826,7 +3037,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
   Future<void> _prepare() async {
     setState(() {
       loadingDetail = true;
-      evidence = null;
+      beaconResult = null;
     });
 
     try {
@@ -2859,7 +3070,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
     scanTimer?.cancel();
     setState(() {
       elapsedScanSec = 0;
-      evidence = null;
+      beaconResult = null;
     });
 
     scanTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -2884,14 +3095,17 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
     if (!mounted) return;
 
     setState(() {
-      evidence = scanned;
+      beaconResult = scanned;
       elapsedScanSec = 10;
     });
   }
 
   Future<void> _captureAndSubmit() async {
-    if (evidence == null || evidence!.durationSec == 0) {
-      Get.snackbar('Attendance', 'Valid beacon evidence is required first.');
+    if (beaconResult == null || !beaconResult!.matched) {
+      Get.snackbar(
+        'Attendance',
+        'A verified hall beacon is required before you continue.',
+      );
       return;
     }
 
@@ -2910,7 +3124,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
       );
       final payload = AttendanceSubmitDto(
         sessionId: session.id,
-        beaconEvidence: evidence!,
+        beaconEvidence: beaconResult!.evidence,
       );
 
       final response = await auth.api.submitAttendance(
@@ -2943,16 +3157,22 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
 
   @override
   Widget build(BuildContext context) {
-    final isScanning = beaconScanner.scanning.value;
-    final hasEvidence = evidence != null && evidence!.durationSec > 0;
-    final rssi = evidence?.avgRssi ?? -999;
-    final stability = evidence?.durationSec ?? math.min(elapsedScanSec, 10);
-
     return Scaffold(
       body: SafeArea(
         child: Obx(() {
           final scanning = beaconScanner.scanning.value;
-          final canConfirm = !scanning && hasEvidence && !submitting;
+          final result = beaconResult;
+          final hasMatchedBeacon = result?.matched ?? false;
+          final hasDetectedSignal = result?.detected ?? false;
+          final canConfirm = !scanning && hasMatchedBeacon && !submitting;
+          final rssi = result?.evidence.avgRssi ?? -999;
+          final stability =
+              result?.evidence.durationSec ??
+              math.min(elapsedScanSec, beaconStabilityTargetSec);
+          final pingChecks = math.min(
+            result?.evidence.pingCount ?? beaconScanner.pingCount.value,
+            beaconPingTarget,
+          );
 
           return Column(
             children: [
@@ -2991,11 +3211,10 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                       _radarStatus(scanning),
                       const SizedBox(height: 24),
                       Text(
-                        scanning
-                            ? 'Searching for Beacon...'
-                            : hasEvidence
-                            ? 'Beacon Verified'
-                            : 'No Beacon Found',
+                        _attendanceBeaconTitle(
+                          scanning: scanning,
+                          result: result,
+                        ),
                         style: const TextStyle(
                           color: Color(0xFF798380),
                           fontSize: 22,
@@ -3005,7 +3224,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                       ),
                       const SizedBox(height: 10),
                       Text(
-                        '${_displayHall(session.hallId)} • ${session.moduleName}',
+                        '${_displayHall(session.hallName, session.hallId)} • ${session.moduleName}',
                         style: const TextStyle(
                           color: AppColors.textSecondary,
                           fontSize: 20,
@@ -3016,15 +3235,30 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                       _signalBars(rssi),
                       const SizedBox(height: 8),
                       Text(
-                        '${rssi.toStringAsFixed(0)} dBm  ${_beaconStrengthLabel(rssi).toUpperCase()}',
+                        hasDetectedSignal
+                            ? '${rssi.toStringAsFixed(0)} dBm  ${_beaconStrengthLabel(rssi).toUpperCase()}'
+                            : 'Waiting for hall beacon signal',
                         style: TextStyle(
-                          color: hasEvidence
+                          color: hasMatchedBeacon
                               ? AppColors.primary
                               : AppColors.textSecondary,
                           fontWeight: FontWeight.w700,
                           fontSize: 18,
                           letterSpacing: 0.6,
                         ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        _attendanceBeaconMessage(
+                          scanning: scanning,
+                          result: result,
+                        ),
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 16,
+                          height: 1.35,
+                        ),
+                        textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 24),
                       Container(
@@ -3042,7 +3276,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    'Stability Check',
+                                    'Beacon Checks',
                                     style: TextStyle(
                                       color: AppColors.textSecondary,
                                       fontSize: 17,
@@ -3050,7 +3284,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                                   ),
                                   SizedBox(height: 4),
                                   Text(
-                                    'Hold steady',
+                                    'Need 5 successful pings',
                                     style: TextStyle(
                                       color: AppColors.textPrimary,
                                       fontWeight: FontWeight.w700,
@@ -3064,7 +3298,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
                                 Text(
-                                  '$stability/$beaconStabilityTargetSec',
+                                  '$pingChecks/$beaconPingTarget',
                                   style: const TextStyle(
                                     color: AppColors.primary,
                                     fontWeight: FontWeight.w700,
@@ -3072,19 +3306,37 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                                   ),
                                 ),
                                 const SizedBox(height: 2),
+                                Text(
+                                  '${math.min(stability, beaconStabilityTargetSec)}/${beaconStabilityTargetSec}s stable',
+                                  style: const TextStyle(
+                                    color: AppColors.textSecondary,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 9,
                                     vertical: 4,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFFD3F7E4),
+                                    color: _attendanceBeaconBadgeBackground(
+                                      scanning: scanning,
+                                      result: result,
+                                    ),
                                     borderRadius: BorderRadius.circular(999),
                                   ),
                                   child: Text(
-                                    hasEvidence ? 'Verified' : 'Verifying',
-                                    style: const TextStyle(
-                                      color: AppColors.success,
+                                    _attendanceBeaconBadgeLabel(
+                                      scanning: scanning,
+                                      result: result,
+                                    ),
+                                    style: TextStyle(
+                                      color: _attendanceBeaconBadgeForeground(
+                                        scanning: scanning,
+                                        result: result,
+                                      ),
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
@@ -3102,16 +3354,19 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
                         onPressed: canConfirm ? _captureAndSubmit : null,
                       ),
                       const SizedBox(height: 14),
-                      const Text(
-                        'Please stay within the lecture hall for successful verification.',
-                        style: TextStyle(
+                      Text(
+                        _attendanceBeaconFooter(
+                          scanning: scanning,
+                          result: result,
+                        ),
+                        style: const TextStyle(
                           color: Color(0xFF90A0B8),
                           fontSize: 17,
                           height: 1.4,
                         ),
                         textAlign: TextAlign.center,
                       ),
-                      if (loadingDetail || isScanning)
+                      if (loadingDetail || scanning)
                         const Padding(
                           padding: EdgeInsets.only(top: 14),
                           child: LinearProgressIndicator(minHeight: 3),
@@ -3274,7 +3529,7 @@ class AttendanceResultPage extends StatelessWidget {
                     Text(
                       success
                           ? 'Successfully recorded on N Wallet'
-                          : (reasonCode ?? 'Attendance rejected.'),
+                          : _attendanceRejectMessage(reasonCode),
                       style: const TextStyle(
                         color: AppColors.textSecondary,
                         fontSize: 16,
@@ -3350,7 +3605,10 @@ class AttendanceResultPage extends StatelessWidget {
                             label: 'LOCATION',
                             value: session == null
                                 ? '-'
-                                : _displayHall(session.hallId),
+                                : _displayHall(
+                                    session.hallName,
+                                    session.hallId,
+                                  ),
                           ),
                           _resultDetail(
                             icon: Icons.schedule,
@@ -3653,7 +3911,7 @@ class _HistoryPageState extends State<HistoryPage> {
     final title = session?.moduleName ?? 'Session $sessionId';
     final subtitle = session == null
         ? 'Session ID: $sessionId'
-        : _displayHall(session.hallId);
+        : _displayHall(session.hallName, session.hallId);
     final createdAt = _formatDateTimeShort(row['createdAt'] as String?);
 
     return Container(
@@ -4413,6 +4671,1309 @@ class _PrivacyConsentPageState extends State<PrivacyConsentPage> {
   }
 }
 
+const Map<DeviceOrientation, int> _kCameraOrientations =
+    <DeviceOrientation, int>{
+      DeviceOrientation.portraitUp: 0,
+      DeviceOrientation.landscapeLeft: 90,
+      DeviceOrientation.portraitDown: 180,
+      DeviceOrientation.landscapeRight: 270,
+    };
+
+enum _EnrollmentCaptureStage { front, firstSide, oppositeSide }
+
+const double _kFrontYawMax = 10;
+const double _kSideYawMin = 12;
+
+class EnrollmentAutoCapturePage extends StatefulWidget {
+  const EnrollmentAutoCapturePage({super.key});
+
+  @override
+  State<EnrollmentAutoCapturePage> createState() =>
+      _EnrollmentAutoCapturePageState();
+}
+
+class _EnrollmentAutoCapturePageState extends State<EnrollmentAutoCapturePage> {
+  late final FaceDetector faceDetector;
+
+  CameraController? controller;
+  final List<String> capturedPaths = <String>[];
+
+  bool initializing = true;
+  bool streaming = false;
+  bool processingFrame = false;
+  bool capturing = false;
+  String? error;
+  String guidanceTitle = 'Look straight ahead';
+  String guidanceMessage = 'Hold still while we detect your face.';
+
+  DateTime _lastProcessedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _stableMatchCount = 0;
+  int? _firstSideSign;
+
+  _EnrollmentCaptureStage get _currentStage {
+    switch (capturedPaths.length) {
+      case 0:
+        return _EnrollmentCaptureStage.front;
+      case 1:
+        return _EnrollmentCaptureStage.firstSide;
+      default:
+        return _EnrollmentCaptureStage.oppositeSide;
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    faceDetector = FaceDetector(
+      options: FaceDetectorOptions(
+        enableTracking: true,
+        minFaceSize: 0.15,
+        performanceMode: FaceDetectorMode.accurate,
+      ),
+    );
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    final cameraLoadError = await _ensureCamerasLoaded();
+    if (cameraLoadError != null) {
+      setState(() {
+        initializing = false;
+        error = cameraLoadError;
+      });
+      return;
+    }
+
+    final selected = gCameras.firstWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.front,
+      orElse: () => gCameras.first,
+    );
+
+    final cameraController = CameraController(
+      selected,
+      ResolutionPreset.medium,
+      enableAudio: false,
+      imageFormatGroup: Platform.isIOS
+          ? ImageFormatGroup.bgra8888
+          : ImageFormatGroup.nv21,
+    );
+
+    try {
+      await cameraController.initialize();
+      if (!cameraController.supportsImageStreaming()) {
+        throw CameraException(
+          'image-streaming-unavailable',
+          'Live face detection is not supported on this device.',
+        );
+      }
+
+      if (!mounted) {
+        await cameraController.dispose();
+        return;
+      }
+
+      setState(() {
+        controller = cameraController;
+        initializing = false;
+        error = null;
+      });
+      _updateGuidanceForCurrentStage();
+      await _startImageStream();
+    } catch (e) {
+      await cameraController.dispose();
+      if (!mounted) return;
+      setState(() {
+        initializing = false;
+        error = 'Unable to start guided capture: $e';
+      });
+    }
+  }
+
+  Future<void> _startImageStream() async {
+    final cameraController = controller;
+    if (cameraController == null || streaming || !mounted) return;
+    await cameraController.startImageStream(_processCameraImage);
+    streaming = true;
+  }
+
+  Future<void> _stopImageStream() async {
+    final cameraController = controller;
+    if (cameraController == null || !streaming) return;
+    try {
+      await cameraController.stopImageStream();
+    } catch (_) {
+      // Ignore stop failures during page transitions or dispose.
+    } finally {
+      streaming = false;
+    }
+  }
+
+  Future<void> _restartScan() async {
+    if (capturing) return;
+    setState(() {
+      capturedPaths.clear();
+      _firstSideSign = null;
+      _stableMatchCount = 0;
+    });
+    _updateGuidanceForCurrentStage();
+  }
+
+  Future<void> _retryCamera() async {
+    final oldController = controller;
+    controller = null;
+    if (oldController != null) {
+      await _stopImageStream();
+      await oldController.dispose();
+    }
+    if (!mounted) return;
+    setState(() {
+      initializing = true;
+      error = null;
+      capturedPaths.clear();
+      _firstSideSign = null;
+      _stableMatchCount = 0;
+    });
+    await _initCamera();
+  }
+
+  Future<void> _processCameraImage(CameraImage image) async {
+    if (!mounted || capturing || processingFrame || error != null) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastProcessedAt) < const Duration(milliseconds: 350)) {
+      return;
+    }
+    _lastProcessedAt = now;
+
+    final inputImage = _inputImageFromCameraImage(image);
+    if (inputImage == null) return;
+
+    processingFrame = true;
+    try {
+      final faces = await faceDetector.processImage(inputImage);
+      if (!mounted || capturing) return;
+      _handleFaces(faces, inputImage.metadata!.size);
+    } catch (_) {
+      // Keep the preview alive if one frame fails to process.
+    } finally {
+      processingFrame = false;
+    }
+  }
+
+  void _handleFaces(List<Face> faces, Size imageSize) {
+    if (faces.isEmpty) {
+      _stableMatchCount = 0;
+      _setGuidance(
+        'Find your face',
+        'Place your full face inside the circle so the scan can begin.',
+      );
+      return;
+    }
+
+    if (faces.length > 1) {
+      _stableMatchCount = 0;
+      _setGuidance(
+        'One person only',
+        'Make sure only one face is visible in the camera view.',
+      );
+      return;
+    }
+
+    final face = faces.first;
+    if (!_isFaceAligned(face, imageSize)) {
+      _stableMatchCount = 0;
+      return;
+    }
+
+    if (!_matchesCurrentStage(face)) {
+      _stableMatchCount = 0;
+      _updateGuidanceForCurrentStage();
+      return;
+    }
+
+    _stableMatchCount += 1;
+    if (_stableMatchCount < 2) {
+      _setGuidance(
+        'Hold still',
+        'Stay steady for a moment while we capture this angle.',
+      );
+      return;
+    }
+
+    unawaited(_captureCurrentStage(face));
+  }
+
+  bool _isFaceAligned(Face face, Size imageSize) {
+    final bounds = face.boundingBox;
+    final widthRatio = bounds.width / imageSize.width;
+    final heightRatio = bounds.height / imageSize.height;
+    final centerX = bounds.center.dx / imageSize.width;
+    final centerY = bounds.center.dy / imageSize.height;
+    final isSideStage = _currentStage != _EnrollmentCaptureStage.front;
+    final minWidthRatio = isSideStage ? 0.13 : 0.18;
+    final minHeightRatio = isSideStage ? 0.15 : 0.18;
+    final minCenterX = isSideStage ? 0.20 : 0.28;
+    final maxCenterX = isSideStage ? 0.80 : 0.72;
+
+    if (widthRatio < minWidthRatio || heightRatio < minHeightRatio) {
+      _setGuidance(
+        'Move closer',
+        'Bring your face a little closer until it fills more of the circle.',
+      );
+      return false;
+    }
+
+    if (widthRatio > 0.68 || heightRatio > 0.82) {
+      _setGuidance(
+        'Move back slightly',
+        'Keep your full face visible inside the guide.',
+      );
+      return false;
+    }
+
+    if (centerX < minCenterX ||
+        centerX > maxCenterX ||
+        centerY < 0.16 ||
+        centerY > 0.80) {
+      _setGuidance(
+        'Center your face',
+        isSideStage
+            ? 'Keep your face inside the circle while you turn.'
+            : 'Keep your face inside the circle and look directly at the camera.',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  bool _matchesCurrentStage(Face face) {
+    final yaw = face.headEulerAngleY;
+    final pitch = face.headEulerAngleX ?? 0;
+    final roll = face.headEulerAngleZ ?? 0;
+    final isSideStage = _currentStage != _EnrollmentCaptureStage.front;
+
+    if (yaw == null ||
+        pitch.abs() > (isSideStage ? 24 : 18) ||
+        roll.abs() > (isSideStage ? 20 : 15)) {
+      return false;
+    }
+
+    switch (_currentStage) {
+      case _EnrollmentCaptureStage.front:
+        return yaw.abs() <= _kFrontYawMax;
+      case _EnrollmentCaptureStage.firstSide:
+        return yaw.abs() >= _kSideYawMin;
+      case _EnrollmentCaptureStage.oppositeSide:
+        final sign = _sideSignForYaw(yaw);
+        return sign != null &&
+            _firstSideSign != null &&
+            sign != _firstSideSign &&
+            yaw.abs() >= _kSideYawMin;
+    }
+  }
+
+  int? _sideSignForYaw(double? yaw) {
+    if (yaw == null || yaw.abs() < _kSideYawMin) return null;
+    return yaw > 0 ? 1 : -1;
+  }
+
+  Future<void> _captureCurrentStage(Face face) async {
+    final cameraController = controller;
+    if (cameraController == null || capturing) return;
+
+    final stageBeforeCapture = _currentStage;
+    final sideSign = _sideSignForYaw(face.headEulerAngleY);
+
+    setState(() {
+      capturing = true;
+      _stableMatchCount = 0;
+    });
+    _setGuidance(
+      'Capturing ${capturedPaths.length + 1} of 3',
+      'Hold still while the photo is saved.',
+    );
+
+    try {
+      await _stopImageStream();
+      final photo = await cameraController.takePicture();
+      if (!mounted) return;
+
+      setState(() {
+        capturedPaths.add(photo.path);
+        if (stageBeforeCapture == _EnrollmentCaptureStage.firstSide) {
+          _firstSideSign = sideSign;
+        }
+      });
+
+      if (capturedPaths.length == 3) {
+        Get.back(result: List<String>.from(capturedPaths));
+        return;
+      }
+
+      await Future<void>.delayed(const Duration(milliseconds: 650));
+      if (!mounted) return;
+
+      _updateGuidanceForCurrentStage();
+      await _startImageStream();
+      if (!mounted) return;
+      setState(() {
+        capturing = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        capturing = false;
+        error = 'Automatic capture failed: $e';
+      });
+    }
+  }
+
+  void _updateGuidanceForCurrentStage() {
+    switch (_currentStage) {
+      case _EnrollmentCaptureStage.front:
+        _setGuidance(
+          'Look straight ahead',
+          'Face the camera directly. We will take the first photo automatically.',
+        );
+        break;
+      case _EnrollmentCaptureStage.firstSide:
+        _setGuidance(
+          'Turn to one side',
+          'Slowly turn your head to either side and keep your face inside the circle.',
+        );
+        break;
+      case _EnrollmentCaptureStage.oppositeSide:
+        _setGuidance(
+          'Turn to the other side',
+          'Move back through the center, then turn the other way for the final photo.',
+        );
+        break;
+    }
+  }
+
+  void _setGuidance(String title, String message) {
+    if (!mounted) return;
+    if (guidanceTitle == title && guidanceMessage == message) return;
+    setState(() {
+      guidanceTitle = title;
+      guidanceMessage = message;
+    });
+  }
+
+  // ML Kit expects platform-specific image metadata from the live camera stream.
+  InputImage? _inputImageFromCameraImage(CameraImage image) {
+    final cameraController = controller;
+    if (cameraController == null) return null;
+
+    final rotation = _inputRotationFromCamera(cameraController);
+    if (rotation == null) return null;
+
+    final format = InputImageFormatValue.fromRawValue(image.format.raw);
+    if (format == null ||
+        (Platform.isAndroid && format != InputImageFormat.nv21) ||
+        (Platform.isIOS && format != InputImageFormat.bgra8888)) {
+      return null;
+    }
+
+    if (image.planes.length != 1) return null;
+    final plane = image.planes.first;
+
+    return InputImage.fromBytes(
+      bytes: plane.bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: format,
+        bytesPerRow: plane.bytesPerRow,
+      ),
+    );
+  }
+
+  InputImageRotation? _inputRotationFromCamera(
+    CameraController cameraController,
+  ) {
+    final sensorOrientation = cameraController.description.sensorOrientation;
+
+    if (Platform.isIOS) {
+      return InputImageRotationValue.fromRawValue(sensorOrientation);
+    }
+
+    if (!Platform.isAndroid) return null;
+
+    var compensation =
+        _kCameraOrientations[cameraController.value.deviceOrientation];
+    if (compensation == null) return null;
+
+    if (cameraController.description.lensDirection ==
+        CameraLensDirection.front) {
+      compensation = (sensorOrientation + compensation) % 360;
+    } else {
+      compensation = (sensorOrientation - compensation + 360) % 360;
+    }
+
+    return InputImageRotationValue.fromRawValue(compensation);
+  }
+
+  @override
+  void dispose() {
+    final activeController = controller;
+    if (activeController != null && activeController.value.isStreamingImages) {
+      unawaited(activeController.stopImageStream().catchError((_) {}));
+    }
+    activeController?.dispose();
+    unawaited(faceDetector.close());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (initializing) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    if (error != null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Guided Face Scan')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  error!,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 16,
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                PrimaryActionButton(
+                  text: 'Retry Camera',
+                  onPressed: _retryCamera,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: Get.back,
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                  const Expanded(
+                    child: Text(
+                      'Guided Face Scan',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  const SizedBox(width: 42),
+                ],
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(24, 10, 24, 0),
+              child: Text(
+                'Keep your face inside the circle. We will capture three photos automatically as you change angles.',
+                style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 16,
+                  height: 1.45,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: _PortraitCameraViewport(
+                  controller: controller!,
+                  overlayOpacity: 0.24,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 292,
+                          height: 292,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: capturing
+                                  ? AppColors.success
+                                  : Colors.white,
+                              width: 3,
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        top: 18,
+                        left: 16,
+                        right: 16,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.38),
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.auto_awesome,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'Captured ${capturedPaths.length} of 3',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 15,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: List<Widget>.generate(3, (index) {
+                      final done = index < capturedPaths.length;
+                      final active = index == capturedPaths.length;
+                      return AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        width: 34,
+                        height: 34,
+                        margin: const EdgeInsets.symmetric(horizontal: 6),
+                        decoration: BoxDecoration(
+                          color: done
+                              ? AppColors.primary.withValues(alpha: 0.16)
+                              : active
+                              ? AppColors.primary.withValues(alpha: 0.12)
+                              : Colors.white,
+                          borderRadius: BorderRadius.circular(17),
+                          border: Border.all(
+                            color: done || active
+                                ? AppColors.primary
+                                : AppColors.border,
+                          ),
+                        ),
+                        child: Center(
+                          child: done
+                              ? const Icon(
+                                  Icons.check,
+                                  size: 18,
+                                  color: AppColors.primary,
+                                )
+                              : Text(
+                                  '${index + 1}',
+                                  style: TextStyle(
+                                    color: active
+                                        ? AppColors.primary
+                                        : AppColors.textSecondary,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                        ),
+                      );
+                    }),
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: AppColors.primary.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Icon(
+                            capturing
+                                ? Icons.photo_camera
+                                : Icons.face_retouching_natural,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                guidanceTitle,
+                                style: const TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                guidanceMessage,
+                                style: const TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 15,
+                                  height: 1.45,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Good lighting and a single face in the frame will give the best enrollment result.',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 14,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: capturing ? null : _restartScan,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Restart Scan'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class IdentityAutoCapturePage extends StatefulWidget {
+  const IdentityAutoCapturePage({super.key});
+
+  @override
+  State<IdentityAutoCapturePage> createState() =>
+      _IdentityAutoCapturePageState();
+}
+
+class _IdentityAutoCapturePageState extends State<IdentityAutoCapturePage> {
+  late final FaceDetector faceDetector;
+
+  CameraController? controller;
+  bool initializing = true;
+  bool streaming = false;
+  bool processingFrame = false;
+  bool capturing = false;
+  String? error;
+  String guidanceTitle = 'Look straight ahead';
+  String guidanceMessage =
+      'Keep your face inside the circle. The photo will be captured automatically.';
+
+  DateTime _lastProcessedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _stableMatchCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    faceDetector = FaceDetector(
+      options: FaceDetectorOptions(
+        enableTracking: true,
+        minFaceSize: 0.15,
+        performanceMode: FaceDetectorMode.accurate,
+      ),
+    );
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    final cameraLoadError = await _ensureCamerasLoaded();
+    if (cameraLoadError != null) {
+      setState(() {
+        initializing = false;
+        error = cameraLoadError;
+      });
+      return;
+    }
+
+    final selected = gCameras.firstWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.front,
+      orElse: () => gCameras.first,
+    );
+
+    final cameraController = CameraController(
+      selected,
+      ResolutionPreset.medium,
+      enableAudio: false,
+      imageFormatGroup: Platform.isIOS
+          ? ImageFormatGroup.bgra8888
+          : ImageFormatGroup.nv21,
+    );
+
+    try {
+      await cameraController.initialize();
+      if (!cameraController.supportsImageStreaming()) {
+        throw CameraException(
+          'image-streaming-unavailable',
+          'Live face detection is not supported on this device.',
+        );
+      }
+
+      if (!mounted) {
+        await cameraController.dispose();
+        return;
+      }
+
+      setState(() {
+        controller = cameraController;
+        initializing = false;
+        error = null;
+      });
+      await _startImageStream();
+    } catch (e) {
+      await cameraController.dispose();
+      if (!mounted) return;
+      setState(() {
+        initializing = false;
+        error = 'Unable to start auto capture: $e';
+      });
+    }
+  }
+
+  Future<void> _startImageStream() async {
+    final cameraController = controller;
+    if (cameraController == null || streaming || !mounted) return;
+    await cameraController.startImageStream(_processCameraImage);
+    streaming = true;
+  }
+
+  Future<void> _stopImageStream() async {
+    final cameraController = controller;
+    if (cameraController == null || !streaming) return;
+    try {
+      await cameraController.stopImageStream();
+    } catch (_) {
+      // Ignore stop failures during page transitions or dispose.
+    } finally {
+      streaming = false;
+    }
+  }
+
+  Future<void> _retryCamera() async {
+    final oldController = controller;
+    controller = null;
+    if (oldController != null) {
+      await _stopImageStream();
+      await oldController.dispose();
+    }
+    if (!mounted) return;
+    setState(() {
+      initializing = true;
+      error = null;
+      _stableMatchCount = 0;
+      guidanceTitle = 'Look straight ahead';
+      guidanceMessage =
+          'Keep your face inside the circle. The photo will be captured automatically.';
+    });
+    await _initCamera();
+  }
+
+  Future<void> _processCameraImage(CameraImage image) async {
+    if (!mounted || capturing || processingFrame || error != null) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastProcessedAt) < const Duration(milliseconds: 300)) {
+      return;
+    }
+    _lastProcessedAt = now;
+
+    final inputImage = _inputImageFromCameraImage(image);
+    if (inputImage == null) return;
+
+    processingFrame = true;
+    try {
+      final faces = await faceDetector.processImage(inputImage);
+      if (!mounted || capturing) return;
+      _handleFaces(faces, inputImage.metadata!.size);
+    } catch (_) {
+      // Keep the preview alive if one frame fails to process.
+    } finally {
+      processingFrame = false;
+    }
+  }
+
+  void _handleFaces(List<Face> faces, Size imageSize) {
+    if (faces.isEmpty) {
+      _stableMatchCount = 0;
+      _setGuidance(
+        'Find your face',
+        'Place your full face inside the circle so we can verify you.',
+      );
+      return;
+    }
+
+    if (faces.length > 1) {
+      _stableMatchCount = 0;
+      _setGuidance(
+        'One person only',
+        'Make sure only your face is visible in the frame.',
+      );
+      return;
+    }
+
+    final face = faces.first;
+    if (!_isFaceAligned(face, imageSize)) {
+      _stableMatchCount = 0;
+      return;
+    }
+
+    if (!_isFaceFrontal(face)) {
+      _stableMatchCount = 0;
+      _setGuidance(
+        'Face the camera',
+        'Look straight ahead and keep your head level for a quick capture.',
+      );
+      return;
+    }
+
+    _stableMatchCount += 1;
+    if (_stableMatchCount < 2) {
+      _setGuidance(
+        'Hold still',
+        'Stay steady for a moment while we capture your photo.',
+      );
+      return;
+    }
+
+    unawaited(_capturePhoto());
+  }
+
+  bool _isFaceAligned(Face face, Size imageSize) {
+    final bounds = face.boundingBox;
+    final widthRatio = bounds.width / imageSize.width;
+    final heightRatio = bounds.height / imageSize.height;
+    final centerX = bounds.center.dx / imageSize.width;
+    final centerY = bounds.center.dy / imageSize.height;
+
+    if (widthRatio < 0.15 || heightRatio < 0.17) {
+      _setGuidance(
+        'Move closer',
+        'Bring your face a little closer until it fills more of the guide.',
+      );
+      return false;
+    }
+
+    if (widthRatio > 0.74 || heightRatio > 0.84) {
+      _setGuidance(
+        'Move back slightly',
+        'Keep your full face visible inside the circle.',
+      );
+      return false;
+    }
+
+    if (centerX < 0.24 || centerX > 0.76 || centerY < 0.16 || centerY > 0.80) {
+      _setGuidance(
+        'Center your face',
+        'Keep your face inside the circle and look directly at the camera.',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  bool _isFaceFrontal(Face face) {
+    final yaw = face.headEulerAngleY;
+    final pitch = face.headEulerAngleX ?? 0;
+    final roll = face.headEulerAngleZ ?? 0;
+
+    if (yaw == null) return false;
+    return yaw.abs() <= _kFrontYawMax && pitch.abs() <= 18 && roll.abs() <= 15;
+  }
+
+  Future<void> _capturePhoto() async {
+    final cameraController = controller;
+    if (cameraController == null || capturing) return;
+
+    setState(() {
+      capturing = true;
+      _stableMatchCount = 0;
+    });
+    _setGuidance('Capturing photo', 'Hold still while we save the image.');
+
+    try {
+      await _stopImageStream();
+      final photo = await cameraController.takePicture();
+      if (!mounted) return;
+      Get.back(result: photo.path);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        capturing = false;
+        error = 'Automatic capture failed: $e';
+      });
+    }
+  }
+
+  void _setGuidance(String title, String message) {
+    if (!mounted) return;
+    if (guidanceTitle == title && guidanceMessage == message) return;
+    setState(() {
+      guidanceTitle = title;
+      guidanceMessage = message;
+    });
+  }
+
+  InputImage? _inputImageFromCameraImage(CameraImage image) {
+    final cameraController = controller;
+    if (cameraController == null) return null;
+
+    final rotation = _inputRotationFromCamera(cameraController);
+    if (rotation == null) return null;
+
+    final format = InputImageFormatValue.fromRawValue(image.format.raw);
+    if (format == null ||
+        (Platform.isAndroid && format != InputImageFormat.nv21) ||
+        (Platform.isIOS && format != InputImageFormat.bgra8888)) {
+      return null;
+    }
+
+    if (image.planes.length != 1) return null;
+    final plane = image.planes.first;
+
+    return InputImage.fromBytes(
+      bytes: plane.bytes,
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: format,
+        bytesPerRow: plane.bytesPerRow,
+      ),
+    );
+  }
+
+  InputImageRotation? _inputRotationFromCamera(
+    CameraController cameraController,
+  ) {
+    final sensorOrientation = cameraController.description.sensorOrientation;
+
+    if (Platform.isIOS) {
+      return InputImageRotationValue.fromRawValue(sensorOrientation);
+    }
+
+    if (!Platform.isAndroid) return null;
+
+    var compensation =
+        _kCameraOrientations[cameraController.value.deviceOrientation];
+    if (compensation == null) return null;
+
+    if (cameraController.description.lensDirection ==
+        CameraLensDirection.front) {
+      compensation = (sensorOrientation + compensation) % 360;
+    } else {
+      compensation = (sensorOrientation - compensation + 360) % 360;
+    }
+
+    return InputImageRotationValue.fromRawValue(compensation);
+  }
+
+  @override
+  void dispose() {
+    final activeController = controller;
+    if (activeController != null && activeController.value.isStreamingImages) {
+      unawaited(activeController.stopImageStream().catchError((_) {}));
+    }
+    activeController?.dispose();
+    unawaited(faceDetector.close());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (initializing) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    if (error != null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Verify Your Identity')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  error!,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 16,
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                PrimaryActionButton(
+                  text: 'Retry Camera',
+                  onPressed: _retryCamera,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: Get.back,
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                  const Expanded(
+                    child: Text(
+                      'Verify Your Identity',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  const SizedBox(width: 42),
+                ],
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(24, 10, 24, 0),
+              child: Text(
+                'Look straight ahead. Your face photo will be captured automatically.',
+                style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 16,
+                  height: 1.45,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: _PortraitCameraViewport(
+                  controller: controller!,
+                  overlayOpacity: 0.22,
+                  child: Center(
+                    child: Container(
+                      width: 308,
+                      height: 308,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: capturing ? AppColors.success : Colors.white,
+                          width: 3,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              child: Column(
+                children: [
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: AppColors.primary.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Icon(
+                            capturing
+                                ? Icons.photo_camera
+                                : Icons.face_retouching_natural,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                guidanceTitle,
+                                style: const TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                guidanceMessage,
+                                style: const TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 15,
+                                  height: 1.45,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Use good lighting and keep only your face in the frame.',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 14,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PortraitCameraViewport extends StatelessWidget {
+  const _PortraitCameraViewport({
+    required this.controller,
+    required this.child,
+    this.overlayOpacity = 0.2,
+  });
+
+  final CameraController controller;
+  final Widget child;
+  final double overlayOpacity;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const frameAspectRatio = 0.74;
+        final frameWidth = math.min(
+          constraints.maxWidth,
+          constraints.maxHeight * frameAspectRatio,
+        );
+        final frameHeight = frameWidth / frameAspectRatio;
+
+        return Center(
+          child: SizedBox(
+            width: frameWidth,
+            height: frameHeight,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(28),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  _CameraPreviewCover(controller: controller),
+                  Container(
+                    color: Colors.black.withValues(alpha: overlayOpacity),
+                  ),
+                  child,
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _CameraPreviewCover extends StatelessWidget {
+  const _CameraPreviewCover({required this.controller});
+
+  final CameraController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final previewSize = controller.value.previewSize;
+    if (previewSize == null) {
+      return CameraPreview(controller);
+    }
+
+    return SizedBox.expand(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: previewSize.height,
+          height: previewSize.width,
+          child: CameraPreview(controller),
+        ),
+      ),
+    );
+  }
+}
+
 class CaptureFacePage extends StatefulWidget {
   const CaptureFacePage({super.key});
 
@@ -4432,10 +5993,11 @@ class _CaptureFacePageState extends State<CaptureFacePage> {
   }
 
   Future<void> _initCamera() async {
-    if (gCameras.isEmpty) {
+    final cameraLoadError = await _ensureCamerasLoaded();
+    if (cameraLoadError != null) {
       setState(() {
         initializing = false;
-        error = 'No camera found on this device.';
+        error = cameraLoadError;
       });
       return;
     }
@@ -4514,24 +6076,18 @@ class _CaptureFacePageState extends State<CaptureFacePage> {
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(28),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      CameraPreview(controller!),
-                      Container(color: Colors.black.withValues(alpha: 0.2)),
-                      Center(
-                        child: Container(
-                          width: 230,
-                          height: 230,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 3),
-                          ),
-                        ),
+                child: _PortraitCameraViewport(
+                  controller: controller!,
+                  overlayOpacity: 0.2,
+                  child: Center(
+                    child: Container(
+                      width: 304,
+                      height: 304,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 3),
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ),
@@ -4709,7 +6265,12 @@ String _displayLecturer(String email) {
   return words.isEmpty ? email : words.join(' ');
 }
 
-String _displayHall(String hallId) {
+String _displayHall(String hallName, String hallId) {
+  final trimmedName = hallName.trim();
+  if (trimmedName.isNotEmpty) {
+    return trimmedName;
+  }
+
   if (hallId.trim().isEmpty) {
     return 'Lecture Hall';
   }
@@ -4753,6 +6314,262 @@ String _attendanceWindowLabel(StudentSessionDto session) {
   final suffix = hh >= 12 ? 'PM' : 'AM';
   final hour12 = ((hh + 11) % 12) + 1;
   return 'Open until ${hour12.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')} $suffix';
+}
+
+String _previewBeaconTitle({
+  required bool hasMapping,
+  required BeaconScanStatus? status,
+}) {
+  if (!hasMapping || status == BeaconScanStatus.noMapping) {
+    return 'No Beacon Mapping';
+  }
+
+  switch (status) {
+    case BeaconScanStatus.bluetoothOff:
+      return 'Bluetooth Off';
+    case BeaconScanStatus.locationPermissionDenied:
+      return 'Location Permission Required';
+    case BeaconScanStatus.locationServicesOff:
+      return 'Location Services Off';
+    case BeaconScanStatus.scanFailed:
+      return 'Beacon Scan Failed';
+    case BeaconScanStatus.notFound:
+      return 'Hall Beacon Not Detected';
+    case BeaconScanStatus.weak:
+    case BeaconScanStatus.unstable:
+    case BeaconScanStatus.matched:
+      return 'Hall Beacon Detected';
+    case BeaconScanStatus.noMapping:
+    case null:
+      return 'Hall Beacon Mapped';
+  }
+}
+
+String _previewBeaconMessage({
+  required bool hasMapping,
+  required BeaconScanResult? result,
+}) {
+  if (!hasMapping) {
+    return 'Admin has not mapped an active beacon for this hall.';
+  }
+
+  final status = result?.status;
+  switch (status) {
+    case BeaconScanStatus.bluetoothOff:
+      return 'Turn on Bluetooth to detect the hall beacon.';
+    case BeaconScanStatus.locationPermissionDenied:
+      return 'Allow location access so the app can range iBeacons.';
+    case BeaconScanStatus.locationServicesOff:
+      return 'Turn on location services to scan for the hall beacon.';
+    case BeaconScanStatus.scanFailed:
+      return 'Unable to read the hall beacon right now. Please try again.';
+    case BeaconScanStatus.notFound:
+      return 'Move closer to the lecture hall beacon and refresh.';
+    case BeaconScanStatus.weak:
+      return 'Signal strength is ${_beaconStrengthLabel(result!.evidence.avgRssi)}. Move closer for attendance.';
+    case BeaconScanStatus.unstable:
+      return 'Beacon detected. Hold the device steady for a moment.';
+    case BeaconScanStatus.matched:
+      return 'Signal Strength: ${_beaconStrengthLabel(result!.evidence.avgRssi)}';
+    case BeaconScanStatus.noMapping:
+    case null:
+      return 'Scanning for the mapped hall beacon.';
+  }
+}
+
+String _attendanceBeaconTitle({
+  required bool scanning,
+  required BeaconScanResult? result,
+}) {
+  if (scanning) return 'Searching for Beacon...';
+
+  switch (result?.status) {
+    case BeaconScanStatus.noMapping:
+      return 'No Beacon Mapping';
+    case BeaconScanStatus.bluetoothOff:
+      return 'Bluetooth Off';
+    case BeaconScanStatus.locationPermissionDenied:
+      return 'Location Permission Needed';
+    case BeaconScanStatus.locationServicesOff:
+      return 'Location Services Off';
+    case BeaconScanStatus.scanFailed:
+      return 'Scan Failed';
+    case BeaconScanStatus.notFound:
+      return 'No Beacon Found';
+    case BeaconScanStatus.weak:
+      return 'Beacon Signal Too Weak';
+    case BeaconScanStatus.unstable:
+      return 'Hold Steady Near Beacon';
+    case BeaconScanStatus.matched:
+      return 'Beacon Verified';
+    case null:
+      return 'Waiting for Beacon Scan';
+  }
+}
+
+String _attendanceBeaconMessage({
+  required bool scanning,
+  required BeaconScanResult? result,
+}) {
+  if (scanning) {
+    return 'Looking for the exact hall beacon using UUID, major and minor.';
+  }
+
+  switch (result?.status) {
+    case BeaconScanStatus.noMapping:
+      return 'No active beacon is mapped to this lecture hall yet.';
+    case BeaconScanStatus.bluetoothOff:
+      return 'Turn on Bluetooth, then scan again.';
+    case BeaconScanStatus.locationPermissionDenied:
+      return 'Allow location access for iBeacon proximity checks.';
+    case BeaconScanStatus.locationServicesOff:
+      return 'Turn on location services, then retry the beacon scan.';
+    case BeaconScanStatus.scanFailed:
+      return 'The beacon scan failed. Retry once you are near the lecture hall.';
+    case BeaconScanStatus.notFound:
+      return 'The expected hall beacon was not detected during this scan.';
+    case BeaconScanStatus.weak:
+      return 'The correct beacon was found, but the signal is too weak right now.';
+    case BeaconScanStatus.unstable:
+      return 'The correct beacon was found, but we need a few more successful beacon checks.';
+    case BeaconScanStatus.matched:
+      return 'Hall beacon identity and proximity checks passed.';
+    case null:
+      return 'Start a scan while standing inside the lecture hall.';
+  }
+}
+
+String _attendanceBeaconBadgeLabel({
+  required bool scanning,
+  required BeaconScanResult? result,
+}) {
+  if (scanning) return 'Scanning';
+
+  switch (result?.status) {
+    case BeaconScanStatus.matched:
+      return 'Verified';
+    case BeaconScanStatus.weak:
+      return 'Weak signal';
+    case BeaconScanStatus.unstable:
+      return 'More checks';
+    case BeaconScanStatus.notFound:
+      return 'Not found';
+    case BeaconScanStatus.bluetoothOff:
+      return 'Bluetooth off';
+    case BeaconScanStatus.locationPermissionDenied:
+      return 'Permission needed';
+    case BeaconScanStatus.locationServicesOff:
+      return 'Location off';
+    case BeaconScanStatus.scanFailed:
+      return 'Retry';
+    case BeaconScanStatus.noMapping:
+      return 'No mapping';
+    case null:
+      return 'Waiting';
+  }
+}
+
+Color _attendanceBeaconBadgeBackground({
+  required bool scanning,
+  required BeaconScanResult? result,
+}) {
+  if (scanning) {
+    return const Color(0xFFE3ECF7);
+  }
+
+  switch (result?.status) {
+    case BeaconScanStatus.matched:
+      return const Color(0xFFD3F7E4);
+    case BeaconScanStatus.weak:
+    case BeaconScanStatus.unstable:
+      return const Color(0xFFFFEDD5);
+    case BeaconScanStatus.notFound:
+    case BeaconScanStatus.bluetoothOff:
+    case BeaconScanStatus.locationPermissionDenied:
+    case BeaconScanStatus.locationServicesOff:
+    case BeaconScanStatus.scanFailed:
+    case BeaconScanStatus.noMapping:
+    case null:
+      return const Color(0xFFE7EDF5);
+  }
+}
+
+Color _attendanceBeaconBadgeForeground({
+  required bool scanning,
+  required BeaconScanResult? result,
+}) {
+  if (scanning) {
+    return const Color(0xFF5E718F);
+  }
+
+  switch (result?.status) {
+    case BeaconScanStatus.matched:
+      return AppColors.success;
+    case BeaconScanStatus.weak:
+    case BeaconScanStatus.unstable:
+      return AppColors.warning;
+    case BeaconScanStatus.notFound:
+    case BeaconScanStatus.bluetoothOff:
+    case BeaconScanStatus.locationPermissionDenied:
+    case BeaconScanStatus.locationServicesOff:
+    case BeaconScanStatus.scanFailed:
+    case BeaconScanStatus.noMapping:
+    case null:
+      return AppColors.textSecondary;
+  }
+}
+
+String _attendanceBeaconFooter({
+  required bool scanning,
+  required BeaconScanResult? result,
+}) {
+  if (scanning) {
+    return 'Stay inside the lecture hall until the beacon scan completes.';
+  }
+
+  switch (result?.status) {
+    case BeaconScanStatus.matched:
+      return 'Beacon verification passed. You can continue to face capture.';
+    case BeaconScanStatus.weak:
+      return 'Move closer to the hall beacon and scan again.';
+    case BeaconScanStatus.unstable:
+      return 'Stay near the beacon until 5 successful checks are recorded, then try again.';
+    case BeaconScanStatus.notFound:
+      return 'Please stand inside the lecture hall and retry the scan.';
+    case BeaconScanStatus.bluetoothOff:
+      return 'Enable Bluetooth before retrying the hall beacon scan.';
+    case BeaconScanStatus.locationPermissionDenied:
+      return 'Grant location permission before retrying the hall beacon scan.';
+    case BeaconScanStatus.locationServicesOff:
+      return 'Turn on location services before retrying the hall beacon scan.';
+    case BeaconScanStatus.scanFailed:
+      return 'Retry the beacon scan while standing near the lecture hall beacon.';
+    case BeaconScanStatus.noMapping:
+      return 'Ask an admin to map an active beacon to this lecture hall.';
+    case null:
+      return 'Please stay within the lecture hall for successful verification.';
+  }
+}
+
+String _attendanceRejectMessage(String? reasonCode) {
+  switch ((reasonCode ?? '').toUpperCase()) {
+    case 'BEACON_MISMATCH':
+      return 'The detected beacon does not match this lecture hall.';
+    case 'BEACON_WEAK':
+      return 'The correct hall beacon was found, but the signal was too weak.';
+    case 'BEACON_UNSTABLE':
+      return 'The correct hall beacon was found, but not enough successful proximity checks were recorded.';
+    case 'FACE_FAIL':
+      return 'Face verification did not pass.';
+    case 'OUTSIDE_WINDOW':
+      return 'Attendance is closed for this session.';
+    case 'SESSION_NOT_ASSIGNED':
+      return 'This session is not assigned to your academic profile.';
+    case 'NOT_ENROLLED':
+      return 'Face enrollment is required before attendance can be submitted.';
+  }
+
+  return reasonCode ?? 'Attendance rejected.';
 }
 
 String _beaconStrengthLabel(double rssi) {

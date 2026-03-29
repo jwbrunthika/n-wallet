@@ -4,12 +4,16 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Models\Beacon;
 use App\Models\LectureSession;
+use App\Models\LectureHall;
 use App\Models\Student;
 use App\Services\AcademicProfileService;
 use Illuminate\Http\Request;
 
 class StudentSessionController extends ApiController
 {
+    /** @var array<string, string> */
+    private array $hallNameCache = [];
+
     public function __construct(private readonly AcademicProfileService $academicProfileService)
     {
     }
@@ -63,8 +67,9 @@ class StudentSessionController extends ApiController
 
     private function mapSession(LectureSession $session): array
     {
+        $hallId = (string) $session->hallId;
         $beacon = Beacon::query()
-            ->where('hallId', (string) $session->hallId)
+            ->where('hallId', $hallId)
             ->where('enabled', true)
             ->first();
 
@@ -76,7 +81,8 @@ class StudentSessionController extends ApiController
             'courseCode' => $session->courseCode,
             'moduleCode' => $session->moduleCode,
             'moduleName' => $session->moduleName,
-            'hallId' => $session->hallId,
+            'hallId' => $hallId,
+            'hallName' => $this->hallNameFor($hallId),
             'batch' => $session->batch,
             'deliveryMode' => $session->deliveryMode ?? LectureSession::DELIVERY_MODE_BOTH,
             'lecturerEmail' => $session->lecturerEmail,
@@ -89,5 +95,20 @@ class StudentSessionController extends ApiController
                 'minor' => (int) $beacon->minor,
             ] : null,
         ];
+    }
+
+    private function hallNameFor(string $hallId): string
+    {
+        if ($hallId === '') {
+            return '';
+        }
+
+        if (array_key_exists($hallId, $this->hallNameCache)) {
+            return $this->hallNameCache[$hallId];
+        }
+
+        $hall = LectureHall::query()->find($hallId);
+
+        return $this->hallNameCache[$hallId] = trim((string) ($hall?->name ?? ''));
     }
 }

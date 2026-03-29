@@ -39,9 +39,25 @@ Important config values currently in `.env.docker`:
 - `MONGO_URI=mongodb://root:rootpass@mongo:27017`
 - `MONGO_DATABASE=nwallet`
 - `FACE_SERVICE_URL=http://face_service:8001`
-- `MAIL_HOST=smtp.gmail.com`
-- `MAIL_USERNAME=nwallet.2002@gmail.com`
+- `MAIL_HOST=mail.nodecmb.com`
+- `MAIL_PORT=465`
+- `MAIL_USERNAME=nwallet@nodecmb.com`
+- `MAIL_FROM_ADDRESS=nwallet@nodecmb.com`
 - `OTP_DEV_MODE=false`
+
+## 4A) Active iBeacon Mapping (Current)
+- Hall: `FOC G-009`
+- Hall Mongo ID: `699c16c7580784714f0513a5`
+- Beacon identity used for attendance:
+  - UUID: `E2C56DB5-DFFB-48D2-B060-D0F5A71096E0`
+  - Major: `5`
+  - Minor: `6`
+- Operational metadata:
+  - BLE name: `CP28-B766`
+  - MAC: `48:87:2D:9D:B7:66`
+  - Model: `CP28`
+- Only `UUID + Major + Minor` are used for attendance matching.
+- BLE name and MAC are not used by backend validation.
 
 ## 5) Standard Operations
 Run from:
@@ -55,6 +71,11 @@ docker compose up -d --build
 Bootstrap backend:
 ```bash
 ./scripts/bootstrap_backend.sh
+```
+
+Rebuild backend code after any change under `backend_api/`:
+```bash
+./scripts/rebuild_backend.sh
 ```
 
 Restart one service:
@@ -91,6 +112,10 @@ docker compose up -d --build
 Notes:
 - Backend and face service are built on VPS by compose.
 - Admin web is static files served by nginx container from `admin_web/build/web`.
+- `backend_php` does not mount `/home/ubuntu/N-Wallet/backend_api` into the container.
+- PHP source is baked into the `n-wallet-backend_php` image at build time.
+- Because of that, copying files into `/home/ubuntu/N-Wallet/backend_api` or only restarting `backend_php` will not update the live API.
+- After any Laravel/backend code change, run `./scripts/rebuild_backend.sh` or `docker compose up -d --build backend_php`.
 
 ## 7) Backup and Restore Runbook
 Create backup directory:

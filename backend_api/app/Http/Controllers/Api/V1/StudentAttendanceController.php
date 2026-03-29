@@ -34,6 +34,7 @@ class StudentAttendanceController extends ApiController
                 'minor' => (int) ($beaconEvidence['minor'] ?? -1),
                 'avgRssi' => (float) ($beaconEvidence['avgRssi'] ?? -999),
                 'durationSec' => (int) ($beaconEvidence['durationSec'] ?? 0),
+                'pingCount' => (int) ($beaconEvidence['pingCount'] ?? 0),
             ];
 
             /** @var Student $student */

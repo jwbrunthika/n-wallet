@@ -67,10 +67,24 @@ Important groups:
   - Email: `nwallet.2002@gmail.com`
   - Password: `Nodecmb@2k26`
 - Student auth: OTP by email.
-- SMTP currently configured for Gmail sender `nwallet.2002@gmail.com`.
+- SMTP currently configured for sender `nwallet@nodecmb.com` via `mail.nodecmb.com`.
+
+## 7A) Active Beacon Hardware (Current)
+- Active hall beacon rollout target:
+  - Hall: `FOC G-009`
+  - UUID: `E2C56DB5-DFFB-48D2-B060-D0F5A71096E0`
+  - Major: `5`
+  - Minor: `6`
+- Operational metadata:
+  - BLE name: `CP28-B766`
+  - MAC: `48:87:2D:9D:B7:66`
+  - Model: `CP28`
+- Attendance identity matching uses only:
+  - `UUID + Major + Minor`
+- BLE name and MAC are operational reference values only and are not used in attendance validation.
 
 Security note:
-- Rotate admin credentials, SMTP app password, Mongo credentials, APP/JWT keys immediately after handover.
+- Rotate admin credentials, SMTP credentials, Mongo credentials, APP/JWT keys immediately after handover.
 
 ## 8) Encryption and Security Methods
 - Password hashing:

@@ -42,7 +42,7 @@ class OtpService
         $cooldownSec = (int) env('OTP_RESEND_COOLDOWN_SECONDS', 60);
         $maxAttempts = (int) env('OTP_MAX_ATTEMPTS', 5);
 
-        OtpRequest::query()->create([
+        $otpRequest = OtpRequest::query()->create([
             'otpRequestId' => $otpRequestId,
             'email' => $email,
             'otpHash' => Hash::make($otp),
@@ -59,14 +59,21 @@ class OtpService
             try {
                 $this->mailOtpSender->send($email, $otp);
             } catch (\Throwable $exception) {
-                Log::warning('OTP SMTP send failed, falling back to DEV log mode.', [
+                // Remove the unusable OTP record so the client can retry immediately.
+                $otpRequest->delete();
+
+                Log::error('OTP SMTP send failed.', [
                     'email' => $email,
+                    'otpRequestId' => $otpRequestId,
                     'exceptionClass' => $exception::class,
                     'exceptionMessage' => $exception->getMessage(),
                 ]);
 
-                // If SMTP is unavailable in demo environments, fallback to DEV log mode.
-                $this->devLogOtpSender->send($email, $otp);
+                throw new ApiException(
+                    'OTP_DELIVERY_FAILED',
+                    'Unable to send OTP email right now. Please try again later.',
+                    503
+                );
             }
         }
 

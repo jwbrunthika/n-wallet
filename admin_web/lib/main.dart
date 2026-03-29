@@ -686,7 +686,28 @@ class _BeaconPageState extends State<BeaconPage> {
   final uuidController = TextEditingController();
   final majorController = TextEditingController();
   final minorController = TextEditingController();
-  final hallIdController = TextEditingController();
+  String? selectedHallId;
+
+  String? _selectedHallValue(List<Map<String, dynamic>> halls) {
+    final current = selectedHallId;
+    if (current != null &&
+        halls.any((hall) => (hall['id'] as String?) == current)) {
+      return current;
+    }
+    return halls.isEmpty ? null : halls.first['id'] as String?;
+  }
+
+  String _hallName(String? hallId) {
+    for (final hall in widget.controller.halls) {
+      if ((hall['id'] as String?) == hallId) {
+        final name = (hall['name'] as String?)?.trim();
+        if (name != null && name.isNotEmpty) {
+          return name;
+        }
+      }
+    }
+    return hallId?.trim().isNotEmpty == true ? hallId! : 'Unknown hall';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -694,52 +715,90 @@ class _BeaconPageState extends State<BeaconPage> {
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              SizedBox(
-                width: 220,
-                child: TextField(
-                  controller: uuidController,
-                  decoration: const InputDecoration(labelText: 'UUID'),
+          Obx(() {
+            final halls = widget.controller.halls.toList(growable: false);
+            final currentHallId = _selectedHallValue(halls);
+
+            return Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                SizedBox(
+                  width: 260,
+                  child: TextField(
+                    controller: uuidController,
+                    decoration: const InputDecoration(labelText: 'UUID'),
+                  ),
                 ),
-              ),
-              SizedBox(
-                width: 100,
-                child: TextField(
-                  controller: majorController,
-                  decoration: const InputDecoration(labelText: 'Major'),
+                SizedBox(
+                  width: 100,
+                  child: TextField(
+                    controller: majorController,
+                    decoration: const InputDecoration(labelText: 'Major'),
+                  ),
                 ),
-              ),
-              SizedBox(
-                width: 100,
-                child: TextField(
-                  controller: minorController,
-                  decoration: const InputDecoration(labelText: 'Minor'),
+                SizedBox(
+                  width: 100,
+                  child: TextField(
+                    controller: minorController,
+                    decoration: const InputDecoration(labelText: 'Minor'),
+                  ),
                 ),
-              ),
-              SizedBox(
-                width: 220,
-                child: TextField(
-                  controller: hallIdController,
-                  decoration: const InputDecoration(labelText: 'Hall ID'),
+                SizedBox(
+                  width: 240,
+                  child: DropdownButtonFormField<String>(
+                    value: currentHallId,
+                    decoration: const InputDecoration(
+                      labelText: 'Lecture hall',
+                    ),
+                    items: halls
+                        .map(
+                          (hall) => DropdownMenuItem<String>(
+                            value: hall['id'] as String?,
+                            child: Text(
+                              (hall['name'] as String?) ??
+                                  (hall['id'] as String? ?? ''),
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: halls.isEmpty
+                        ? null
+                        : (value) {
+                            setState(() => selectedHallId = value);
+                          },
+                  ),
                 ),
-              ),
-              FilledButton(
-                onPressed: () async {
-                  await widget.controller.createBeacon({
-                    'uuid': uuidController.text.trim(),
-                    'major': int.tryParse(majorController.text) ?? 0,
-                    'minor': int.tryParse(minorController.text) ?? 0,
-                    'hallId': hallIdController.text.trim(),
-                    'enabled': true,
-                  });
-                },
-                child: const Text('Add Beacon'),
-              ),
-            ],
-          ),
+                FilledButton(
+                  onPressed: halls.isEmpty
+                      ? null
+                      : () async {
+                          final hallId = _selectedHallValue(halls);
+                          if (hallId == null || hallId.isEmpty) {
+                            Get.snackbar(
+                              'Beacon',
+                              'Please select a lecture hall first.',
+                            );
+                            return;
+                          }
+
+                          await widget.controller.createBeacon({
+                            'uuid': uuidController.text.trim(),
+                            'major': int.tryParse(majorController.text) ?? 0,
+                            'minor': int.tryParse(minorController.text) ?? 0,
+                            'hallId': hallId,
+                            'enabled': true,
+                          });
+
+                          uuidController.clear();
+                          majorController.clear();
+                          minorController.clear();
+                        },
+                  child: const Text('Add Beacon'),
+                ),
+              ],
+            );
+          }),
           const SizedBox(height: 16),
           Expanded(
             child: Obx(
@@ -752,7 +811,7 @@ class _BeaconPageState extends State<BeaconPage> {
                       '${beacon['uuid']} (${beacon['major']}/${beacon['minor']})',
                     ),
                     subtitle: Text(
-                      'hallId: ${beacon['hallId']} | enabled: ${beacon['enabled']}',
+                      '${_hallName(beacon['hallId'] as String?)} | hallId: ${beacon['hallId']} | enabled: ${beacon['enabled']}',
                     ),
                     trailing: IconButton(
                       icon: const Icon(Icons.delete),

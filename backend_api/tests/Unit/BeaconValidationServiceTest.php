@@ -25,6 +25,7 @@ class BeaconValidationServiceTest extends TestCase
             'minor' => 2,
             'avgRssi' => -60,
             'durationSec' => 12,
+            'pingCount' => 2,
         ], -70, 8);
 
         $this->assertTrue($result['passed']);
@@ -48,9 +49,58 @@ class BeaconValidationServiceTest extends TestCase
             'minor' => 2,
             'avgRssi' => -60,
             'durationSec' => 12,
+            'pingCount' => 7,
         ], -70, 8);
 
         $this->assertFalse($result['passed']);
         $this->assertSame('BEACON_MISMATCH', $result['reasonCode']);
+    }
+
+    public function test_it_passes_when_ping_count_threshold_is_met(): void
+    {
+        $service = new BeaconValidationService();
+        $beacon = new Beacon([
+            'uuid' => 'abcd',
+            'major' => 1,
+            'minor' => 2,
+            'hallId' => 'hall-1',
+            'enabled' => true,
+        ]);
+
+        $result = $service->validate($beacon, [
+            'uuid' => 'abcd',
+            'major' => 1,
+            'minor' => 2,
+            'avgRssi' => -60,
+            'durationSec' => 4,
+            'pingCount' => 5,
+        ], -70, 8, 5);
+
+        $this->assertTrue($result['passed']);
+        $this->assertNull($result['reasonCode']);
+    }
+
+    public function test_it_fails_when_duration_and_ping_count_are_below_threshold(): void
+    {
+        $service = new BeaconValidationService();
+        $beacon = new Beacon([
+            'uuid' => 'abcd',
+            'major' => 1,
+            'minor' => 2,
+            'hallId' => 'hall-1',
+            'enabled' => true,
+        ]);
+
+        $result = $service->validate($beacon, [
+            'uuid' => 'abcd',
+            'major' => 1,
+            'minor' => 2,
+            'avgRssi' => -60,
+            'durationSec' => 4,
+            'pingCount' => 3,
+        ], -70, 8, 5);
+
+        $this->assertFalse($result['passed']);
+        $this->assertSame('BEACON_UNSTABLE', $result['reasonCode']);
     }
 }
