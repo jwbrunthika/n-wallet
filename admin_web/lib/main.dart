@@ -1,8 +1,13 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart' hide FormData, MultipartFile;
 import 'package:get_storage/get_storage.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import 'package:shared_dart/shared_dart.dart';
 
 const String kApiBaseUrl = String.fromEnvironment(
@@ -38,6 +43,11 @@ String extractApiError(Object error) {
     return error.message ?? 'Unknown API error';
   }
   return error.toString();
+}
+
+Map<String, dynamic> extractEnvelopeDataMap(dynamic raw) {
+  final envelope = Map<String, dynamic>.from(raw as Map? ?? {});
+  return Map<String, dynamic>.from(envelope['data'] as Map? ?? {});
 }
 
 Future<void> main() async {
@@ -373,6 +383,46 @@ class AdminDataController extends GetxController {
       options: Options(responseType: ResponseType.plain),
     );
     return response.data ?? '';
+  }
+
+  Future<Map<String, dynamic>> fetchStudentAttendanceReport({
+    required String studentEmail,
+    required String periodType,
+    required int year,
+    required int month,
+    required int day,
+  }) async {
+    final response = await auth.api.dio.get(
+      '/admin/attendance/reports/student',
+      queryParameters: {
+        'studentEmail': studentEmail,
+        'periodType': periodType,
+        'year': year,
+        'month': month,
+        'day': day,
+      },
+    );
+    return extractEnvelopeDataMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> fetchModuleAttendanceReport({
+    required String moduleCode,
+    required String periodType,
+    required int year,
+    required int month,
+    required int day,
+  }) async {
+    final response = await auth.api.dio.get(
+      '/admin/attendance/reports/module',
+      queryParameters: {
+        'moduleCode': moduleCode,
+        'periodType': periodType,
+        'year': year,
+        'month': month,
+        'day': day,
+      },
+    );
+    return extractEnvelopeDataMap(response.data);
   }
 }
 
@@ -1983,50 +2033,1078 @@ class StudentPage extends StatelessWidget {
   }
 }
 
-class AttendancePage extends StatelessWidget {
+enum _AttendanceReportMode { student, module }
+
+enum _AttendanceReportPeriod { day, month }
+
+class AttendancePage extends StatefulWidget {
   const AttendancePage({super.key, required this.controller});
 
   final AdminDataController controller;
 
   @override
+  State<AttendancePage> createState() => _AttendancePageState();
+}
+
+class _AttendancePageState extends State<AttendancePage> {
+  _AttendanceReportMode reportMode = _AttendanceReportMode.student;
+  _AttendanceReportPeriod period = _AttendanceReportPeriod.day;
+  late int selectedYear;
+  late int selectedMonth;
+  late int selectedDay;
+  String? selectedStudentEmail;
+  String? selectedModuleCode;
+  Map<String, dynamic>? report;
+  bool loadingReport = false;
+  bool exportingPdf = false;
+  late final TextEditingController studentEmailController;
+  late final FocusNode studentEmailFocusNode;
+
+  AdminDataController get controller => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    final now = DateTime.now();
+    selectedYear = now.year;
+    selectedMonth = now.month;
+    selectedDay = now.day;
+    studentEmailController = TextEditingController();
+    studentEmailFocusNode = FocusNode();
+  }
+
+  @override
+  void dispose() {
+    studentEmailController.dispose();
+    studentEmailFocusNode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        const SizedBox(height: 12),
-        FilledButton(
-          onPressed: () async {
-            final csv = await controller.exportAttendanceCsv();
-            Get.dialog(
-              AlertDialog(
-                title: const Text('Attendance CSV Export Preview'),
-                content: SizedBox(
-                  width: 700,
-                  child: SingleChildScrollView(child: Text(csv)),
+    return Obx(
+      () => ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildReportControls(),
+          const SizedBox(height: 16),
+          if (report != null) _buildReportResult(report!),
+          if (report != null) const SizedBox(height: 16),
+          _buildAttendanceLogs(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReportControls() {
+    final studentEmails = _studentEmails();
+    final moduleCodes = _moduleCodes();
+    final selectedModule = _selectedModuleCode(moduleCodes);
+    final maxDay = DateUtils.getDaysInMonth(selectedYear, selectedMonth);
+    final safeDay = selectedDay > maxDay ? maxDay : selectedDay;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Attendance Reports',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                SegmentedButton<_AttendanceReportMode>(
+                  segments: const [
+                    ButtonSegment(
+                      value: _AttendanceReportMode.student,
+                      icon: Icon(Icons.person_search),
+                      label: Text('Student Report'),
+                    ),
+                    ButtonSegment(
+                      value: _AttendanceReportMode.module,
+                      icon: Icon(Icons.menu_book),
+                      label: Text('Module Report'),
+                    ),
+                  ],
+                  selected: {reportMode},
+                  onSelectionChanged: (value) {
+                    setState(() {
+                      reportMode = value.first;
+                      report = null;
+                    });
+                  },
                 ),
+                SegmentedButton<_AttendanceReportPeriod>(
+                  segments: const [
+                    ButtonSegment(
+                      value: _AttendanceReportPeriod.day,
+                      label: Text('Day'),
+                    ),
+                    ButtonSegment(
+                      value: _AttendanceReportPeriod.month,
+                      label: Text('Month'),
+                    ),
+                  ],
+                  selected: {period},
+                  onSelectionChanged: (value) {
+                    setState(() {
+                      period = value.first;
+                      report = null;
+                    });
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                SizedBox(
+                  width: 150,
+                  child: DropdownButtonFormField<int>(
+                    value: selectedYear,
+                    decoration: const InputDecoration(labelText: 'Year'),
+                    items: _yearOptions()
+                        .map(
+                          (year) => DropdownMenuItem(
+                            value: year,
+                            child: Text(year.toString()),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() {
+                        selectedYear = value;
+                        _clampSelectedDay();
+                        report = null;
+                      });
+                    },
+                  ),
+                ),
+                SizedBox(
+                  width: 170,
+                  child: DropdownButtonFormField<int>(
+                    value: selectedMonth,
+                    decoration: const InputDecoration(labelText: 'Month'),
+                    items: List<DropdownMenuItem<int>>.generate(12, (index) {
+                      final month = index + 1;
+                      return DropdownMenuItem(
+                        value: month,
+                        child: Text(
+                          '${month.toString().padLeft(2, '0')} - ${_monthName(month)}',
+                        ),
+                      );
+                    }),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() {
+                        selectedMonth = value;
+                        _clampSelectedDay();
+                        report = null;
+                      });
+                    },
+                  ),
+                ),
+                SizedBox(
+                  width: 130,
+                  child: DropdownButtonFormField<int>(
+                    value: safeDay,
+                    decoration: const InputDecoration(labelText: 'Day'),
+                    items: List<DropdownMenuItem<int>>.generate(maxDay, (
+                      index,
+                    ) {
+                      final day = index + 1;
+                      return DropdownMenuItem(
+                        value: day,
+                        child: Text(day.toString().padLeft(2, '0')),
+                      );
+                    }),
+                    onChanged: period == _AttendanceReportPeriod.month
+                        ? null
+                        : (value) {
+                            if (value == null) return;
+                            setState(() {
+                              selectedDay = value;
+                              report = null;
+                            });
+                          },
+                  ),
+                ),
+                if (reportMode == _AttendanceReportMode.student)
+                  SizedBox(
+                    width: 420,
+                    child: _buildStudentEmailAutocomplete(studentEmails),
+                  )
+                else
+                  SizedBox(
+                    width: 320,
+                    child: DropdownButtonFormField<String>(
+                      value: selectedModule,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: 'Module'),
+                      items: moduleCodes
+                          .map(
+                            (code) => DropdownMenuItem(
+                              value: code,
+                              child: Text(
+                                _moduleLabel(code),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        setState(() {
+                          selectedModuleCode = value;
+                          report = null;
+                        });
+                      },
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                FilledButton.icon(
+                  onPressed: loadingReport ? null : _generateReport,
+                  icon: loadingReport
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.analytics),
+                  label: const Text('Generate Report'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: report == null || exportingPdf
+                      ? null
+                      : _exportCurrentReportPdf,
+                  icon: const Icon(Icons.picture_as_pdf),
+                  label: Text(exportingPdf ? 'Preparing PDF...' : 'Export PDF'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStudentEmailAutocomplete(List<String> studentEmails) {
+    return RawAutocomplete<String>(
+      textEditingController: studentEmailController,
+      focusNode: studentEmailFocusNode,
+      displayStringForOption: (email) => email,
+      optionsBuilder: (value) =>
+          _studentEmailOptions(value.text, studentEmails),
+      onSelected: (email) {
+        studentEmailController.value = TextEditingValue(
+          text: email,
+          selection: TextSelection.collapsed(offset: email.length),
+        );
+        setState(() {
+          selectedStudentEmail = email;
+          report = null;
+        });
+      },
+      fieldViewBuilder:
+          (context, fieldController, fieldFocusNode, onFieldSubmitted) {
+            return TextFormField(
+              controller: fieldController,
+              focusNode: fieldFocusNode,
+              enabled: studentEmails.isNotEmpty,
+              decoration: const InputDecoration(
+                labelText: 'Student email',
+                prefixIcon: Icon(Icons.search),
               ),
+              onChanged: (_) {
+                final exactEmail = _selectedStudentEmail(studentEmails);
+                if (selectedStudentEmail == exactEmail && report == null) {
+                  return;
+                }
+                setState(() {
+                  selectedStudentEmail = exactEmail;
+                  report = null;
+                });
+              },
+              onFieldSubmitted: (_) => onFieldSubmitted(),
             );
           },
-          child: const Text('Export CSV'),
-        ),
-        const SizedBox(height: 12),
-        Expanded(
-          child: Obx(
-            () => ListView.builder(
-              itemCount: controller.attendanceLogs.length,
-              itemBuilder: (_, index) {
-                final row = controller.attendanceLogs[index];
-                return ListTile(
-                  title: Text('${row['studentEmail']} - ${row['status']}'),
-                  subtitle: Text(
-                    'reason: ${row['reasonCode'] ?? '-'} | score: ${row['faceScore']}',
-                  ),
-                );
-              },
+      optionsViewBuilder: (context, onSelected, options) {
+        final visibleOptions = options.toList(growable: false);
+        return Align(
+          alignment: Alignment.topLeft,
+          child: Material(
+            elevation: 4,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 280, maxWidth: 420),
+              child: ListView.separated(
+                padding: EdgeInsets.zero,
+                shrinkWrap: true,
+                itemCount: visibleOptions.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final email = visibleOptions[index];
+                  final name = _studentName(email);
+                  return InkWell(
+                    onTap: () => onSelected(email),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            email,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (name != null)
+                            Text(
+                              name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
           ),
+        );
+      },
+    );
+  }
+
+  Widget _buildReportResult(Map<String, dynamic> data) {
+    final reportType = data['reportType'] as String? ?? '';
+    return reportType == 'module'
+        ? _buildModuleReport(data)
+        : _buildStudentReport(data);
+  }
+
+  Widget _buildStudentReport(Map<String, dynamic> data) {
+    final student = _map(data['student']);
+    final course = data['course'] is Map ? _map(data['course']) : null;
+    final totals = _map(data['totals']);
+    final modules = _listOfMaps(data['modules']);
+    final sessions = _listOfMaps(data['sessions']);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _reportHeader('Student-wise Attendance Report', data),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _metricCard(
+                  'Scheduled',
+                  _intValue(totals['scheduled']).toString(),
+                ),
+                _metricCard(
+                  'Attended',
+                  _intValue(totals['attended']).toString(),
+                ),
+                _metricCard('Failed', _intValue(totals['failed']).toString()),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '${student['name'] ?? 'Student'} • ${student['email'] ?? '-'}',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+            ),
+            Text(
+              'Course: ${course?['courseName'] ?? student['courseCode'] ?? '-'} | Batch: ${student['batch'] ?? '-'} | Mode: ${student['studyMode'] ?? '-'}',
+            ),
+            const SizedBox(height: 16),
+            _sectionTitle('Assigned Module Summary'),
+            _dataTable(
+              columns: const [
+                'Module',
+                'Name',
+                'Scheduled',
+                'Attended',
+                'Failed',
+              ],
+              rows: modules
+                  .map(
+                    (row) => [
+                      _text(row['moduleCode']),
+                      _text(row['moduleName']),
+                      _text(row['scheduled']),
+                      _text(row['attended']),
+                      _text(row['failed']),
+                    ],
+                  )
+                  .toList(),
+            ),
+            const SizedBox(height: 16),
+            _sectionTitle('Scheduled Sessions'),
+            _dataTable(
+              columns: const [
+                'Date',
+                'Time',
+                'Module',
+                'Record',
+                'Result',
+                'Reason',
+              ],
+              rows: sessions
+                  .map(
+                    (row) => [
+                      _text(row['sessionDate']),
+                      '${_text(row['startTime'])} - ${_text(row['endTime'])}',
+                      '${_text(row['moduleCode'])} ${_text(row['moduleName'])}',
+                      _text(row['recordStatus']),
+                      _text(row['attendanceStatus']),
+                      _text(row['reasonCode']),
+                    ],
+                  )
+                  .toList(),
+            ),
+          ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildModuleReport(Map<String, dynamic> data) {
+    final module = _map(data['module']);
+    final totals = _map(data['totals']);
+    final daily = _listOfMaps(data['daily']);
+    final sessions = _listOfMaps(data['sessions']);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _reportHeader('Module-wise Attendance Report', data),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _metricCard(
+                  'Enrolled Students',
+                  _text(data['enrolledStudentCount']),
+                ),
+                _metricCard(
+                  'Expected',
+                  _intValue(totals['expected']).toString(),
+                ),
+                _metricCard(
+                  'Attended',
+                  _intValue(totals['attended']).toString(),
+                ),
+                _metricCard('Failed', _intValue(totals['failed']).toString()),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '${module['moduleCode'] ?? '-'} • ${module['moduleName'] ?? '-'}',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 16),
+            _sectionTitle('Daily Totals'),
+            _dataTable(
+              columns: const ['Date', 'Expected', 'Attended', 'Failed'],
+              rows: daily
+                  .map(
+                    (row) => [
+                      _text(row['date']),
+                      _text(row['expected']),
+                      _text(row['attended']),
+                      _text(row['failed']),
+                    ],
+                  )
+                  .toList(),
+            ),
+            const SizedBox(height: 16),
+            _sectionTitle('Session Breakdown'),
+            _dataTable(
+              columns: const [
+                'Date',
+                'Time',
+                'Course',
+                'Batch',
+                'Expected',
+                'Attended',
+                'Failed',
+              ],
+              rows: sessions
+                  .map(
+                    (row) => [
+                      _text(row['sessionDate']),
+                      '${_text(row['startTime'])} - ${_text(row['endTime'])}',
+                      _text(row['courseCode']),
+                      _text(row['batch']),
+                      _text(row['expected']),
+                      _text(row['attended']),
+                      _text(row['failed']),
+                    ],
+                  )
+                  .toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _reportHeader(String title, Map<String, dynamic> data) {
+    final period = _map(data['period']);
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+          ),
+        ),
+        Chip(label: Text(_text(period['label']))),
       ],
     );
+  }
+
+  Widget _metricCard(String label, String value) {
+    return Container(
+      width: 170,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F7F6),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFD9E4E1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(color: Colors.black54)),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionTitle(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+      ),
+    );
+  }
+
+  Widget _dataTable({
+    required List<String> columns,
+    required List<List<String>> rows,
+  }) {
+    if (rows.isEmpty) {
+      return const Text('No rows for the selected period.');
+    }
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: DataTable(
+        columns: columns
+            .map((column) => DataColumn(label: Text(column)))
+            .toList(),
+        rows: rows
+            .map(
+              (row) => DataRow(
+                cells: row.map((cell) => DataCell(Text(cell))).toList(),
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+
+  Widget _buildAttendanceLogs() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Attendance Logs',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final csv = await controller.exportAttendanceCsv();
+                    Get.dialog(
+                      AlertDialog(
+                        title: const Text('Attendance CSV Export Preview'),
+                        content: SizedBox(
+                          width: 700,
+                          child: SingleChildScrollView(child: Text(csv)),
+                        ),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.download),
+                  label: const Text('Export CSV'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 360,
+              child: ListView.builder(
+                itemCount: controller.attendanceLogs.length,
+                itemBuilder: (_, index) {
+                  final row = controller.attendanceLogs[index];
+                  final session = row['session'] is Map
+                      ? Map<String, dynamic>.from(row['session'] as Map)
+                      : <String, dynamic>{};
+                  return ListTile(
+                    title: Text('${row['studentEmail']} - ${row['status']}'),
+                    subtitle: Text(
+                      '${session['sessionDate'] ?? '-'} | ${session['moduleCode'] ?? '-'} | reason: ${row['reasonCode'] ?? '-'} | score: ${row['faceScore']}',
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _generateReport() async {
+    final studentEmail = _selectedStudentEmail(_studentEmails());
+    final moduleCode = _selectedModuleCode(_moduleCodes());
+
+    if (reportMode == _AttendanceReportMode.student && studentEmail == null) {
+      final typedEmail = studentEmailController.text.trim();
+      Get.snackbar(
+        'Report',
+        typedEmail.isEmpty
+            ? 'Enter a student email first.'
+            : 'Select a valid student email from the suggestions.',
+      );
+      return;
+    }
+    if (reportMode == _AttendanceReportMode.module && moduleCode == null) {
+      Get.snackbar('Report', 'Select a module first.');
+      return;
+    }
+
+    setState(() {
+      loadingReport = true;
+      report = null;
+    });
+
+    try {
+      final result = reportMode == _AttendanceReportMode.student
+          ? await controller.fetchStudentAttendanceReport(
+              studentEmail: studentEmail!,
+              periodType: period.name,
+              year: selectedYear,
+              month: selectedMonth,
+              day: selectedDay,
+            )
+          : await controller.fetchModuleAttendanceReport(
+              moduleCode: moduleCode!,
+              periodType: period.name,
+              year: selectedYear,
+              month: selectedMonth,
+              day: selectedDay,
+            );
+      if (!mounted) return;
+      setState(() => report = result);
+    } catch (error) {
+      Get.snackbar('Report failed', extractApiError(error));
+    } finally {
+      if (mounted) {
+        setState(() => loadingReport = false);
+      }
+    }
+  }
+
+  Future<void> _exportCurrentReportPdf() async {
+    final currentReport = report;
+    if (currentReport == null) return;
+
+    setState(() => exportingPdf = true);
+    try {
+      final bytes = await _buildReportPdf(currentReport);
+      await Printing.sharePdf(
+        bytes: bytes,
+        filename: _reportFilename(currentReport),
+      );
+    } catch (error) {
+      Get.snackbar('PDF export failed', error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => exportingPdf = false);
+      }
+    }
+  }
+
+  Future<Uint8List> _buildReportPdf(Map<String, dynamic> data) async {
+    final doc = pw.Document();
+    final reportType = data['reportType'] as String? ?? '';
+    final title = reportType == 'module'
+        ? 'Module-wise Attendance Report'
+        : 'Student-wise Attendance Report';
+    final period = _map(data['period']);
+
+    doc.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(28),
+        build: (_) => [
+          pw.Text(
+            title,
+            style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold),
+          ),
+          pw.SizedBox(height: 6),
+          pw.Text('Period: ${_text(period['label'])}'),
+          pw.SizedBox(height: 16),
+          if (reportType == 'module')
+            ..._modulePdfWidgets(data)
+          else
+            ..._studentPdfWidgets(data),
+        ],
+      ),
+    );
+
+    return doc.save();
+  }
+
+  List<pw.Widget> _studentPdfWidgets(Map<String, dynamic> data) {
+    final student = _map(data['student']);
+    final course = data['course'] is Map ? _map(data['course']) : null;
+    final totals = _map(data['totals']);
+    final modules = _listOfMaps(data['modules']);
+    final sessions = _listOfMaps(data['sessions']);
+
+    return [
+      pw.Text(
+        'Student: ${student['name'] ?? 'Student'} (${student['email'] ?? '-'})',
+      ),
+      pw.Text(
+        'Course: ${course?['courseName'] ?? student['courseCode'] ?? '-'}',
+      ),
+      pw.Text(
+        'Batch: ${student['batch'] ?? '-'} | Mode: ${student['studyMode'] ?? '-'}',
+      ),
+      pw.SizedBox(height: 12),
+      _pdfSummaryTable([
+        ['Scheduled', _text(totals['scheduled'])],
+        ['Attended', _text(totals['attended'])],
+        ['Failed', _text(totals['failed'])],
+      ]),
+      pw.SizedBox(height: 16),
+      _pdfTitle('Assigned Module Summary'),
+      _pdfTable(
+        ['Module', 'Name', 'Scheduled', 'Attended', 'Failed'],
+        modules
+            .map(
+              (row) => [
+                _text(row['moduleCode']),
+                _text(row['moduleName']),
+                _text(row['scheduled']),
+                _text(row['attended']),
+                _text(row['failed']),
+              ],
+            )
+            .toList(),
+      ),
+      pw.SizedBox(height: 16),
+      _pdfTitle('Scheduled Sessions'),
+      _pdfTable(
+        ['Date', 'Time', 'Module', 'Record', 'Result'],
+        sessions
+            .map(
+              (row) => [
+                _text(row['sessionDate']),
+                '${_text(row['startTime'])} - ${_text(row['endTime'])}',
+                _text(row['moduleCode']),
+                _text(row['recordStatus']),
+                _text(row['attendanceStatus']),
+              ],
+            )
+            .toList(),
+      ),
+    ];
+  }
+
+  List<pw.Widget> _modulePdfWidgets(Map<String, dynamic> data) {
+    final module = _map(data['module']);
+    final totals = _map(data['totals']);
+    final daily = _listOfMaps(data['daily']);
+    final sessions = _listOfMaps(data['sessions']);
+
+    return [
+      pw.Text(
+        'Module: ${module['moduleCode'] ?? '-'} - ${module['moduleName'] ?? '-'}',
+      ),
+      pw.Text('Enrolled students: ${_text(data['enrolledStudentCount'])}'),
+      pw.SizedBox(height: 12),
+      _pdfSummaryTable([
+        ['Expected', _text(totals['expected'])],
+        ['Attended', _text(totals['attended'])],
+        ['Failed', _text(totals['failed'])],
+      ]),
+      pw.SizedBox(height: 16),
+      _pdfTitle('Daily Totals'),
+      _pdfTable(
+        ['Date', 'Expected', 'Attended', 'Failed'],
+        daily
+            .map(
+              (row) => [
+                _text(row['date']),
+                _text(row['expected']),
+                _text(row['attended']),
+                _text(row['failed']),
+              ],
+            )
+            .toList(),
+      ),
+      pw.SizedBox(height: 16),
+      _pdfTitle('Session Breakdown'),
+      _pdfTable(
+        ['Date', 'Time', 'Course', 'Batch', 'Expected', 'Attended', 'Failed'],
+        sessions
+            .map(
+              (row) => [
+                _text(row['sessionDate']),
+                '${_text(row['startTime'])} - ${_text(row['endTime'])}',
+                _text(row['courseCode']),
+                _text(row['batch']),
+                _text(row['expected']),
+                _text(row['attended']),
+                _text(row['failed']),
+              ],
+            )
+            .toList(),
+      ),
+    ];
+  }
+
+  pw.Widget _pdfTitle(String text) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 6),
+      child: pw.Text(
+        text,
+        style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+      ),
+    );
+  }
+
+  pw.Widget _pdfSummaryTable(List<List<String>> rows) {
+    return _pdfTable(['Metric', 'Value'], rows);
+  }
+
+  pw.Widget _pdfTable(List<String> headers, List<List<String>> rows) {
+    return pw.TableHelper.fromTextArray(
+      headers: headers,
+      data: rows.isEmpty ? [List<String>.filled(headers.length, '-')] : rows,
+      headerStyle: pw.TextStyle(
+        fontWeight: pw.FontWeight.bold,
+        color: PdfColors.white,
+      ),
+      headerDecoration: const pw.BoxDecoration(color: PdfColors.green800),
+      cellStyle: const pw.TextStyle(fontSize: 9),
+      cellAlignment: pw.Alignment.centerLeft,
+      cellPadding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+    );
+  }
+
+  String _reportFilename(Map<String, dynamic> data) {
+    final period = _map(data['period']);
+    final label = _safeFilename(_text(period['label']));
+    if ((data['reportType'] as String? ?? '') == 'module') {
+      final module = _map(data['module']);
+      return 'module-attendance_${_safeFilename(_text(module['moduleCode']))}_$label.pdf';
+    }
+
+    final student = _map(data['student']);
+    return 'student-attendance_${_safeFilename(_text(student['email']))}_$label.pdf';
+  }
+
+  List<String> _studentEmails() {
+    return controller.students
+        .map((student) => (student['email'] as String? ?? '').trim())
+        .where((email) => email.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+  }
+
+  List<String> _moduleCodes() {
+    return controller.modules
+        .map(
+          (module) =>
+              (module['moduleCode'] as String? ?? '').trim().toUpperCase(),
+        )
+        .where((code) => code.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+  }
+
+  String? _selectedStudentEmail(List<String> emails) {
+    final typedEmail = studentEmailController.text.trim().toLowerCase();
+    if (typedEmail.isEmpty) {
+      return null;
+    }
+    return emails.firstWhereOrNull(
+      (email) => email.toLowerCase() == typedEmail,
+    );
+  }
+
+  Iterable<String> _studentEmailOptions(String input, List<String> emails) {
+    final query = input.trim().toLowerCase();
+    if (query.isEmpty) {
+      return emails.take(25);
+    }
+
+    return emails
+        .where((email) {
+          final label = _studentLabel(email).toLowerCase();
+          return email.toLowerCase().contains(query) || label.contains(query);
+        })
+        .take(25);
+  }
+
+  String? _selectedModuleCode(List<String> codes) {
+    if (selectedModuleCode != null && codes.contains(selectedModuleCode)) {
+      return selectedModuleCode;
+    }
+    return codes.isEmpty ? null : codes.first;
+  }
+
+  String _studentLabel(String email) {
+    final student = controller.students.firstWhereOrNull(
+      (row) =>
+          (row['email'] as String? ?? '').toLowerCase() == email.toLowerCase(),
+    );
+    final name = _studentNameFromRow(student);
+    return name == null || name.isEmpty ? email : '$name <$email>';
+  }
+
+  String? _studentName(String email) {
+    final student = controller.students.firstWhereOrNull(
+      (row) =>
+          (row['email'] as String? ?? '').toLowerCase() == email.toLowerCase(),
+    );
+    return _studentNameFromRow(student);
+  }
+
+  String? _studentNameFromRow(Map<String, dynamic>? student) {
+    final name = (student?['name'] as String?)?.trim();
+    return name == null || name.isEmpty ? null : name;
+  }
+
+  String _moduleLabel(String code) {
+    final module = controller.modules.firstWhereOrNull(
+      (row) => row['moduleCode'] == code,
+    );
+    final name = (module?['moduleName'] as String?)?.trim();
+    return name == null || name.isEmpty ? code : '$code - $name';
+  }
+
+  List<int> _yearOptions() {
+    final currentYear = DateTime.now().year;
+    var minYear = currentYear - 5;
+    var maxYear = currentYear + 1;
+    for (final session in controller.sessions) {
+      final parsed = DateTime.tryParse('${session['sessionDate'] ?? ''}');
+      if (parsed == null) continue;
+      if (parsed.year < minYear) minYear = parsed.year;
+      if (parsed.year > maxYear) maxYear = parsed.year;
+    }
+    return List<int>.generate(
+      maxYear - minYear + 1,
+      (index) => minYear + index,
+    );
+  }
+
+  void _clampSelectedDay() {
+    final maxDay = DateUtils.getDaysInMonth(selectedYear, selectedMonth);
+    if (selectedDay > maxDay) {
+      selectedDay = maxDay;
+    }
+  }
+
+  String _monthName(int month) {
+    const names = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return names[month - 1];
+  }
+
+  Map<String, dynamic> _map(dynamic value) {
+    return Map<String, dynamic>.from(value as Map? ?? {});
+  }
+
+  List<Map<String, dynamic>> _listOfMaps(dynamic value) {
+    return (value as List? ?? [])
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList();
+  }
+
+  int _intValue(dynamic value) {
+    return (value as num?)?.toInt() ?? 0;
+  }
+
+  String _text(dynamic value) {
+    if (value == null || '$value'.trim().isEmpty) return '-';
+    return '$value';
+  }
+
+  String _safeFilename(String value) {
+    return value.replaceAll(RegExp(r'[^A-Za-z0-9_.-]+'), '_');
   }
 }
 

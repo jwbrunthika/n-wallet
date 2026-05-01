@@ -73,6 +73,8 @@ Route::prefix('v1')->group(function (): void {
 
         Route::get('/attendance/logs', [AdminAttendanceController::class, 'logs']);
         Route::get('/attendance/export', [AdminAttendanceController::class, 'export']);
+        Route::get('/attendance/reports/student', [AdminAttendanceController::class, 'studentReport']);
+        Route::get('/attendance/reports/module', [AdminAttendanceController::class, 'moduleReport']);
 
         Route::get('/settings', [AdminSettingsController::class, 'show']);
         Route::patch('/settings', [AdminSettingsController::class, 'update']);

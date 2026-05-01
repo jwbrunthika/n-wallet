@@ -4,10 +4,16 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Models\AttendanceRecord;
 use App\Models\LectureSession;
+use App\Services\AttendanceReportService;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class AdminAttendanceController extends ApiController
 {
+    public function __construct(private readonly AttendanceReportService $attendanceReportService)
+    {
+    }
+
     public function logs(Request $request)
     {
         $payload = $request->validate([
@@ -64,6 +70,36 @@ class AdminAttendanceController extends ApiController
             ->values();
 
         return $this->success($data);
+    }
+
+    public function studentReport(Request $request)
+    {
+        return $this->guarded(function () use ($request) {
+            $payload = $request->validate([
+                'studentEmail' => ['required', 'email'],
+                'periodType' => ['nullable', Rule::in(['day', 'month'])],
+                'year' => ['nullable', 'integer', 'min:2000', 'max:2100'],
+                'month' => ['nullable', 'integer', 'min:1', 'max:12'],
+                'day' => ['nullable', 'integer', 'min:1', 'max:31'],
+            ]);
+
+            return $this->success($this->attendanceReportService->studentReport($payload));
+        });
+    }
+
+    public function moduleReport(Request $request)
+    {
+        return $this->guarded(function () use ($request) {
+            $payload = $request->validate([
+                'moduleCode' => ['required', 'string', 'max:32'],
+                'periodType' => ['nullable', Rule::in(['day', 'month'])],
+                'year' => ['nullable', 'integer', 'min:2000', 'max:2100'],
+                'month' => ['nullable', 'integer', 'min:1', 'max:12'],
+                'day' => ['nullable', 'integer', 'min:1', 'max:31'],
+            ]);
+
+            return $this->success($this->attendanceReportService->moduleReport($payload));
+        });
     }
 
     public function export(Request $request)
