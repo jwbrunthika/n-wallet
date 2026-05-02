@@ -7,9 +7,9 @@ use App\Models\AttendanceRecord;
 use App\Models\Beacon;
 use App\Models\LectureSession;
 use App\Models\Student;
+use App\Services\Attendance\AttendanceWindowService;
 use App\Services\Attendance\BeaconValidationService;
 use App\Support\ApiException;
-use Carbon\Carbon;
 
 class AttendanceDecisionService
 {
@@ -17,6 +17,7 @@ class AttendanceDecisionService
         private readonly IdentityVerificationService $identityVerificationService,
         private readonly BeaconValidationService $beaconValidationService,
         private readonly AcademicProfileService $academicProfileService,
+        private readonly AttendanceWindowService $attendanceWindowService,
     ) {
     }
 
@@ -54,7 +55,7 @@ class AttendanceDecisionService
             throw new ApiException('DUPLICATE_ATTENDANCE', 'Attendance already submitted for this session.', 409);
         }
 
-        if (! $this->isInsideAttendanceWindow($session)) {
+        if (! $this->attendanceWindowService->isInside($session)) {
             return $this->persistRejected($student->email, (string) $session->_id, 0.0, (float) ($beaconEvidence['avgRssi'] ?? 0), 'OUTSIDE_WINDOW');
         }
 
@@ -123,23 +124,6 @@ class AttendanceDecisionService
             'status' => AttendanceRecord::STATUS_PRESENT,
             'faceScore' => $bestFaceScore,
         ];
-    }
-
-    private function isInsideAttendanceWindow(LectureSession $session): bool
-    {
-        $timezone = config('app.timezone', 'UTC');
-        $sessionStart = Carbon::parse($session->sessionDate.' '.$session->startTime, $timezone);
-        $sessionEnd = Carbon::parse($session->sessionDate.' '.$session->endTime, $timezone);
-
-        // Stored field names are legacy, but current semantics are:
-        // - attendanceOpenMinutesBefore => minutes after session start
-        // - attendanceCloseMinutesAfter => minutes before session end
-        $windowOpen = $sessionStart->copy()->addMinutes((int) $session->attendanceOpenMinutesBefore);
-        $windowClose = $sessionEnd->copy()->subMinutes((int) $session->attendanceCloseMinutesAfter);
-
-        $now = Carbon::now($timezone);
-
-        return $now->between($windowOpen, $windowClose);
     }
 
     private function persistRejected(string $studentEmail, string $sessionId, float $faceScore, float $beaconAvgRssi, string $reasonCode): array

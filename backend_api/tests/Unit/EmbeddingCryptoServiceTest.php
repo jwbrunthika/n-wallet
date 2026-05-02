@@ -13,7 +13,7 @@ class EmbeddingCryptoServiceTest extends TestCase
     {
         parent::setUp();
 
-        $key = base64_decode('SU9TYWxhcmF2ZWx0ZXN0a2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTA=');
+        $key = str_repeat('a', 32);
         Crypt::swap(new Encrypter($key, 'AES-256-CBC'));
     }
 

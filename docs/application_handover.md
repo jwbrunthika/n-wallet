@@ -104,6 +104,8 @@ Security note:
 - Data integrity constraints:
   - Unique indexes enforce identities and anti-duplication (for example, one attendance per `studentEmail + sessionId`).
   - Beacon identity uniqueness is enforced by `uuid + major + minor`; a hall can have multiple enabled beacon mappings.
+- Attendance windows:
+  - Timetable session times are evaluated in `ATTENDANCE_TIMEZONE` (`Asia/Colombo` in production).
 - Protected file access:
   - Enrollment images are served through admin-protected API endpoints (not public static hosting).
 - Audit logging:

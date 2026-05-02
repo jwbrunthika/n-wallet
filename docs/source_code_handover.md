@@ -168,7 +168,7 @@ Flow:
 2. Load student and session
 3. Check student enrolled + session assigned to student profile
 4. Check no duplicate attendance for same student + session
-5. Check attendance time window
+5. Check attendance time window using `ATTENDANCE_TIMEZONE` (`Asia/Colombo` in production)
 6. Compute best face score across frames (cosine similarity)
 7. Validate beacon evidence against expected hall beacon:
    - exact UUID + major + minor
