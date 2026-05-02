@@ -5,9 +5,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart' hide FormData, MultipartFile;
 import 'package:get_storage/get_storage.dart';
+import 'package:admin_web/shared/pdf_export/pdf_export.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart';
 import 'package:shared_dart/shared_dart.dart';
 
 const String kApiBaseUrl = String.fromEnvironment(
@@ -2764,7 +2764,7 @@ class _AttendancePageState extends State<AttendancePage> {
     setState(() => exportingPdf = true);
     try {
       final bytes = await _buildReportPdf(currentReport);
-      await Printing.sharePdf(
+      await exportPdfFile(
         bytes: bytes,
         filename: _reportFilename(currentReport),
       );
