@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Models\Beacon;
 use App\Services\AuditLogService;
+use App\Support\ApiException;
 use Illuminate\Http\Request;
 
 class AdminBeaconController extends ApiController
@@ -37,13 +38,27 @@ class AdminBeaconController extends ApiController
                 'enabled' => ['nullable', 'boolean'],
             ]);
 
-            $beacon = Beacon::query()->create([
-                'uuid' => strtolower((string) $payload['uuid']),
-                'major' => (int) $payload['major'],
-                'minor' => (int) $payload['minor'],
-                'hallId' => (string) $payload['hallId'],
-                'enabled' => (bool) ($payload['enabled'] ?? true),
-            ]);
+            $uuid = strtolower((string) $payload['uuid']);
+            $major = (int) $payload['major'];
+            $minor = (int) $payload['minor'];
+
+            if ($this->beaconIdentityExists($uuid, $major, $minor)) {
+                return $this->duplicateBeaconIdentityError();
+            }
+
+            try {
+                $beacon = Beacon::query()->create([
+                    'uuid' => $uuid,
+                    'major' => $major,
+                    'minor' => $minor,
+                    'hallId' => (string) $payload['hallId'],
+                    'enabled' => (bool) ($payload['enabled'] ?? true),
+                ]);
+            } catch (\Throwable $exception) {
+                $this->throwDuplicateBeaconIdentityIfNeeded($exception);
+
+                throw $exception;
+            }
 
             $adminId = (string) $request->user()->_id;
             $this->auditLogService->log($adminId, 'beacon_create', 'beacon', (string) $beacon->_id, 'Beacon mapping created');
@@ -85,12 +100,26 @@ class AdminBeaconController extends ApiController
                 'enabled' => ['required', 'boolean'],
             ]);
 
-            $beacon->uuid = strtolower((string) $payload['uuid']);
-            $beacon->major = (int) $payload['major'];
-            $beacon->minor = (int) $payload['minor'];
+            $uuid = strtolower((string) $payload['uuid']);
+            $major = (int) $payload['major'];
+            $minor = (int) $payload['minor'];
+
+            if ($this->beaconIdentityExists($uuid, $major, $minor, $id)) {
+                return $this->duplicateBeaconIdentityError();
+            }
+
+            $beacon->uuid = $uuid;
+            $beacon->major = $major;
+            $beacon->minor = $minor;
             $beacon->hallId = (string) $payload['hallId'];
             $beacon->enabled = (bool) $payload['enabled'];
-            $beacon->save();
+            try {
+                $beacon->save();
+            } catch (\Throwable $exception) {
+                $this->throwDuplicateBeaconIdentityIfNeeded($exception);
+
+                throw $exception;
+            }
 
             $adminId = (string) $request->user()->_id;
             $this->auditLogService->log($adminId, 'beacon_update', 'beacon', (string) $beacon->_id, 'Beacon mapping updated');
@@ -113,5 +142,49 @@ class AdminBeaconController extends ApiController
         $this->auditLogService->log($adminId, 'beacon_delete', 'beacon', $beaconId, 'Beacon mapping deleted');
 
         return $this->success(['deleted' => true]);
+    }
+
+    private function beaconIdentityExists(string $uuid, int $major, int $minor, ?string $exceptId = null): bool
+    {
+        $existing = Beacon::query()
+            ->where('uuid', $uuid)
+            ->where('major', $major)
+            ->where('minor', $minor)
+            ->first();
+
+        if (! $existing) {
+            return false;
+        }
+
+        return $exceptId === null || (string) $existing->_id !== $exceptId;
+    }
+
+    private function duplicateBeaconIdentityError()
+    {
+        return $this->error(
+            'BEACON_IDENTITY_EXISTS',
+            'A beacon with this UUID, major, and minor already exists.',
+            null,
+            422
+        );
+    }
+
+    private function throwDuplicateBeaconIdentityIfNeeded(\Throwable $exception): void
+    {
+        $message = $exception->getMessage();
+
+        if (
+            str_contains($message, 'E11000') &&
+            (
+                str_contains($message, 'uuid_1_major_1_minor_1') ||
+                (str_contains($message, 'uuid') && str_contains($message, 'major') && str_contains($message, 'minor'))
+            )
+        ) {
+            throw new ApiException(
+                'BEACON_IDENTITY_EXISTS',
+                'A beacon with this UUID, major, and minor already exists.',
+                422
+            );
+        }
     }
 }

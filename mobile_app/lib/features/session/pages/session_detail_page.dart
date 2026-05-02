@@ -22,7 +22,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
   final scanner = Get.find<BeaconScanController>();
 
   late final StudentSessionDto session;
-  Map<String, dynamic>? expectedBeacon;
+  List<BeaconScanTarget> expectedBeacons = const <BeaconScanTarget>[];
   BeaconScanResult? beaconPreview;
   bool loading = true;
 
@@ -37,16 +37,11 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     setState(() => loading = true);
     try {
       final detail = await auth.api.studentSession(session.id);
-      final beacon = detail['expectedBeacon'];
-      if (beacon is Map) {
-        expectedBeacon = Map<String, dynamic>.from(beacon);
-      }
+      expectedBeacons = beaconScanTargetsFromSessionDetail(detail);
 
-      if (expectedBeacon != null) {
-        final preview = await scanner.scanEvidence(
-          uuid: (expectedBeacon!['uuid'] as String?) ?? '',
-          major: (expectedBeacon!['major'] as num?)?.toInt() ?? 0,
-          minor: (expectedBeacon!['minor'] as num?)?.toInt() ?? 0,
+      if (expectedBeacons.isNotEmpty) {
+        final preview = await scanner.scanAnyEvidence(
+          targets: expectedBeacons,
           scanSeconds: 4,
           rssiThreshold: kBeaconPreviewRssiThreshold,
           stabilitySeconds: kBeaconPreviewStabilitySeconds,
@@ -244,7 +239,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
   }
 
   Widget _beaconStatusCard() {
-    final hasMapping = expectedBeacon != null;
+    final hasMapping = expectedBeacons.isNotEmpty;
     final hasSignal = beaconPreview?.detected ?? false;
     final status = beaconPreview?.status;
 

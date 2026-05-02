@@ -26,7 +26,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
   final beaconScanner = Get.find<BeaconScanController>();
 
   late final StudentSessionDto session;
-  Map<String, dynamic>? expectedBeacon;
+  List<BeaconScanTarget> expectedBeacons = const <BeaconScanTarget>[];
 
   BeaconScanResult? beaconResult;
   bool loadingDetail = true;
@@ -58,12 +58,9 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
 
     try {
       final detail = await auth.api.studentSession(session.id);
-      final beacon = detail['expectedBeacon'];
-      if (beacon is Map) {
-        expectedBeacon = Map<String, dynamic>.from(beacon);
-      }
+      expectedBeacons = beaconScanTargetsFromSessionDetail(detail);
 
-      if (expectedBeacon == null) {
+      if (expectedBeacons.isEmpty) {
         Get.snackbar('Beacon', 'No beacon mapped for this hall.');
       } else {
         await _scanBeacon();
@@ -81,7 +78,7 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
   }
 
   Future<void> _scanBeacon() async {
-    if (expectedBeacon == null) return;
+    if (expectedBeacons.isEmpty) return;
 
     scanTimer?.cancel();
     setState(() {
@@ -100,10 +97,8 @@ class _AttendanceFlowPageState extends State<AttendanceFlowPage> {
       });
     });
 
-    final scanned = await beaconScanner.scanEvidence(
-      uuid: (expectedBeacon!['uuid'] as String?) ?? '',
-      major: (expectedBeacon!['major'] as num?)?.toInt() ?? 0,
-      minor: (expectedBeacon!['minor'] as num?)?.toInt() ?? 0,
+    final scanned = await beaconScanner.scanAnyEvidence(
+      targets: expectedBeacons,
       scanSeconds: 10,
     );
 

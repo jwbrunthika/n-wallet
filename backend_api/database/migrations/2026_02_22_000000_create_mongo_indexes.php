@@ -46,7 +46,7 @@ return new class extends Migration
 
         $beaconCollection = $db->selectCollection('beacons');
         $beaconCollection->createIndex(['uuid' => 1, 'major' => 1, 'minor' => 1], ['unique' => true]);
-        $beaconCollection->createIndex(['hallId' => 1], ['unique' => true]);
+        $beaconCollection->createIndex(['hallId' => 1]);
 
         $db->selectCollection('modules')->createIndex(['moduleCode' => 1], ['unique' => true]);
 

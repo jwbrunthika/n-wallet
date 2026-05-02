@@ -25,6 +25,58 @@ enum BeaconScanStatus {
   matched,
 }
 
+class BeaconScanTarget {
+  const BeaconScanTarget({
+    required this.uuid,
+    required this.major,
+    required this.minor,
+  });
+
+  factory BeaconScanTarget.fromMap(Map<dynamic, dynamic> map) {
+    return BeaconScanTarget(
+      uuid: (map['uuid'] as String?)?.trim() ?? '',
+      major: (map['major'] as num?)?.toInt() ?? 0,
+      minor: (map['minor'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final String uuid;
+  final int major;
+  final int minor;
+
+  bool get hasIdentity => uuid.trim().isNotEmpty;
+}
+
+List<BeaconScanTarget> beaconScanTargetsFromSessionDetail(
+  Map<String, dynamic> detail,
+) {
+  final beaconList = detail['expectedBeacons'];
+  if (beaconList is List) {
+    final targets = beaconList
+        .whereType<Map<dynamic, dynamic>>()
+        .map(BeaconScanTarget.fromMap)
+        .where((target) => target.hasIdentity)
+        .toList();
+    if (targets.isNotEmpty) {
+      return targets;
+    }
+  }
+
+  final legacyBeacon = detail['expectedBeacon'];
+  if (legacyBeacon is Map) {
+    final target = BeaconScanTarget.fromMap(legacyBeacon);
+    if (target.hasIdentity) {
+      return [target];
+    }
+  }
+
+  return const <BeaconScanTarget>[];
+}
+
+String _targetKey(String uuid, int major, int minor) {
+  return '${uuid.toLowerCase()}|$major|$minor';
+}
+
 class BeaconScanResult {
   const BeaconScanResult({required this.status, required this.evidence});
 
@@ -47,14 +99,35 @@ class BeaconScanController extends GetxController {
     double rssiThreshold = kBeaconUiRssiThreshold,
     int stabilitySeconds = kBeaconUiStabilitySeconds,
     double maxDistanceMeters = kBeaconUiMaxDistanceMeters,
+  }) {
+    return scanAnyEvidence(
+      targets: [BeaconScanTarget(uuid: uuid, major: major, minor: minor)],
+      scanSeconds: scanSeconds,
+      rssiThreshold: rssiThreshold,
+      stabilitySeconds: stabilitySeconds,
+      maxDistanceMeters: maxDistanceMeters,
+    );
+  }
+
+  Future<BeaconScanResult> scanAnyEvidence({
+    required List<BeaconScanTarget> targets,
+    int scanSeconds = 10,
+    double rssiThreshold = kBeaconUiRssiThreshold,
+    int stabilitySeconds = kBeaconUiStabilitySeconds,
+    double maxDistanceMeters = kBeaconUiMaxDistanceMeters,
   }) async {
+    final normalizedTargets = _dedupeTargets(targets);
+
     BeaconScanResult emptyResult(BeaconScanStatus status) {
+      final target = normalizedTargets.isNotEmpty
+          ? normalizedTargets.first
+          : const BeaconScanTarget(uuid: '', major: 0, minor: 0);
       return BeaconScanResult(
         status: status,
         evidence: BeaconEvidence(
-          uuid: uuid,
-          major: major,
-          minor: minor,
+          uuid: target.uuid,
+          major: target.major,
+          minor: target.minor,
           avgRssi: -999,
           durationSec: 0,
           distanceMeters: null,
@@ -62,7 +135,7 @@ class BeaconScanController extends GetxController {
       );
     }
 
-    if (uuid.trim().isEmpty) {
+    if (normalizedTargets.isEmpty) {
       return emptyResult(BeaconScanStatus.noMapping);
     }
 
@@ -98,15 +171,14 @@ class BeaconScanController extends GetxController {
       return emptyResult(BeaconScanStatus.scanFailed);
     }
 
-    final region = Region(
-      identifier: 'nwallet-${uuid.toLowerCase()}',
-      proximityUUID: uuid,
-    );
-    final stream = flutterBeacon.ranging([region]);
+    final regions = _regionsForTargets(normalizedTargets);
+    final stream = flutterBeacon.ranging(regions);
+    final accumulators = {
+      for (final target in normalizedTargets)
+        _targetKey(target.uuid, target.major, target.minor):
+            _BeaconReadingAccumulator(target),
+    };
 
-    final rssiReadings = <int>[];
-    DateTime? firstSeen;
-    DateTime? lastSeen;
     StreamSubscription<RangingResult>? subscription;
     final completer = Completer<BeaconScanResult>();
 
@@ -118,32 +190,32 @@ class BeaconScanController extends GetxController {
       completer.complete(result);
     }
 
-    // Beacon evidence summary logic:
-    // 1) only keep readings matching expected UUID/Major/Minor
-    // 2) avgRssi = arithmetic mean of matched RSSI values
+    // Evidence summary logic:
+    // 1) only keep readings matching one configured UUID/Major/Minor target
+    // 2) avgRssi = arithmetic mean of matched RSSI values for the chosen target
     // 3) durationSec = rounded matched dwell time using millisecond precision
-    // 4) distanceMeters = best non-zero estimated distance observed during the scan
+    // 4) distanceMeters = best non-zero estimated distance observed
     scanning.value = true;
     distanceMeters.value = null;
-    final distanceReadings = <double>[];
     try {
       subscription = stream.listen(
         (result) {
           for (final beacon in result.beacons) {
-            final matches =
-                beacon.proximityUUID.toLowerCase() == uuid.toLowerCase() &&
-                beacon.major == major &&
-                beacon.minor == minor;
-            if (!matches) continue;
+            final accumulator =
+                accumulators[_targetKey(
+                  beacon.proximityUUID,
+                  beacon.major,
+                  beacon.minor,
+                )];
+            if (accumulator == null) continue;
 
-            final now = DateTime.now();
-            firstSeen ??= now;
-            lastSeen = now;
-            rssiReadings.add(beacon.rssi);
-            if (beacon.accuracy > 0) {
-              distanceReadings.add(beacon.accuracy);
-              final bestDistance = distanceReadings.reduce(math.min);
-              distanceMeters.value = bestDistance;
+            accumulator.add(beacon);
+            final bestDistance = accumulator.bestDistance;
+            if (bestDistance != null) {
+              final currentDistance = distanceMeters.value;
+              if (currentDistance == null || bestDistance < currentDistance) {
+                distanceMeters.value = bestDistance;
+              }
             }
           }
         },
@@ -159,46 +231,158 @@ class BeaconScanController extends GetxController {
 
     Future<void>.delayed(Duration(seconds: scanSeconds), () async {
       await subscription?.cancel();
-      if (rssiReadings.isEmpty) {
+      final summaries = accumulators.values
+          .where((accumulator) => accumulator.hasReadings)
+          .map(
+            (accumulator) => accumulator.summary(
+              rssiThreshold: rssiThreshold,
+              stabilitySeconds: stabilitySeconds,
+              maxDistanceMeters: maxDistanceMeters,
+            ),
+          )
+          .toList();
+
+      if (summaries.isEmpty) {
         safeComplete(emptyResult(BeaconScanStatus.notFound));
         return;
       }
 
-      final avgRssi =
-          rssiReadings.reduce((a, b) => a + b) / rssiReadings.length;
-      final duration = firstSeen != null && lastSeen != null
-          ? math.max(
-              1,
-              (lastSeen!.difference(firstSeen!).inMilliseconds / 1000).round(),
-            )
-          : 0;
-      final bestDistance = distanceReadings.isEmpty
-          ? null
-          : distanceReadings.reduce(math.min);
+      final matched = summaries
+          .where((summary) => summary.status == BeaconScanStatus.matched)
+          .toList();
+      final unstable = summaries
+          .where((summary) => summary.status == BeaconScanStatus.unstable)
+          .toList();
+      final chosen = matched.isNotEmpty
+          ? _strongestSummary(matched)
+          : unstable.isNotEmpty
+          ? _strongestSummary(unstable)
+          : _strongestSummary(summaries);
 
-      final evidence = BeaconEvidence(
-        uuid: uuid,
-        major: major,
-        minor: minor,
-        avgRssi: avgRssi,
-        durationSec: duration,
-        distanceMeters: bestDistance,
+      safeComplete(
+        BeaconScanResult(status: chosen.status, evidence: chosen.evidence),
       );
-
-      final closeEnough =
-          bestDistance != null &&
-          bestDistance > 0 &&
-          bestDistance <= maxDistanceMeters;
-      final enoughPresence = duration >= stabilitySeconds || closeEnough;
-      final status = avgRssi < rssiThreshold
-          ? BeaconScanStatus.weak
-          : !enoughPresence
-          ? BeaconScanStatus.unstable
-          : BeaconScanStatus.matched;
-
-      safeComplete(BeaconScanResult(status: status, evidence: evidence));
     });
 
     return completer.future;
   }
+
+  List<BeaconScanTarget> _dedupeTargets(List<BeaconScanTarget> targets) {
+    final seenKeys = <String>{};
+    final normalizedTargets = <BeaconScanTarget>[];
+
+    for (final target in targets) {
+      final normalized = BeaconScanTarget(
+        uuid: target.uuid.trim(),
+        major: target.major,
+        minor: target.minor,
+      );
+      if (!normalized.hasIdentity) continue;
+
+      final key = _targetKey(
+        normalized.uuid,
+        normalized.major,
+        normalized.minor,
+      );
+      if (seenKeys.add(key)) {
+        normalizedTargets.add(normalized);
+      }
+    }
+
+    return normalizedTargets;
+  }
+
+  List<Region> _regionsForTargets(List<BeaconScanTarget> targets) {
+    final uuidByLowercase = <String, String>{};
+    for (final target in targets) {
+      uuidByLowercase.putIfAbsent(target.uuid.toLowerCase(), () => target.uuid);
+    }
+
+    return uuidByLowercase.entries
+        .map(
+          (entry) => Region(
+            identifier: 'nwallet-${entry.key}',
+            proximityUUID: entry.value,
+          ),
+        )
+        .toList();
+  }
+
+  _BeaconScanSummary _strongestSummary(List<_BeaconScanSummary> summaries) {
+    summaries.sort(
+      (left, right) => right.evidence.avgRssi.compareTo(left.evidence.avgRssi),
+    );
+    return summaries.first;
+  }
+}
+
+class _BeaconReadingAccumulator {
+  _BeaconReadingAccumulator(this.target);
+
+  final BeaconScanTarget target;
+  final List<int> rssiReadings = <int>[];
+  final List<double> distanceReadings = <double>[];
+  DateTime? firstSeen;
+  DateTime? lastSeen;
+
+  bool get hasReadings => rssiReadings.isNotEmpty;
+
+  double? get bestDistance {
+    if (distanceReadings.isEmpty) {
+      return null;
+    }
+    return distanceReadings.reduce(math.min);
+  }
+
+  void add(Beacon beacon) {
+    final now = DateTime.now();
+    firstSeen ??= now;
+    lastSeen = now;
+    rssiReadings.add(beacon.rssi);
+    if (beacon.accuracy > 0) {
+      distanceReadings.add(beacon.accuracy);
+    }
+  }
+
+  _BeaconScanSummary summary({
+    required double rssiThreshold,
+    required int stabilitySeconds,
+    required double maxDistanceMeters,
+  }) {
+    final avgRssi = rssiReadings.reduce((a, b) => a + b) / rssiReadings.length;
+    final duration = firstSeen != null && lastSeen != null
+        ? math.max(
+            1,
+            (lastSeen!.difference(firstSeen!).inMilliseconds / 1000).round(),
+          )
+        : 0;
+    final distance = bestDistance;
+    final closeEnough =
+        distance != null && distance > 0 && distance <= maxDistanceMeters;
+    final enoughPresence = duration >= stabilitySeconds || closeEnough;
+    final status = avgRssi < rssiThreshold
+        ? BeaconScanStatus.weak
+        : !enoughPresence
+        ? BeaconScanStatus.unstable
+        : BeaconScanStatus.matched;
+
+    return _BeaconScanSummary(
+      status: status,
+      evidence: BeaconEvidence(
+        uuid: target.uuid,
+        major: target.major,
+        minor: target.minor,
+        avgRssi: avgRssi,
+        durationSec: duration,
+        distanceMeters: distance,
+      ),
+    );
+  }
+}
+
+class _BeaconScanSummary {
+  const _BeaconScanSummary({required this.status, required this.evidence});
+
+  final BeaconScanStatus status;
+  final BeaconEvidence evidence;
 }

@@ -103,7 +103,7 @@ Security note:
   - JWT custom claim `token_type` plus middleware `token.type` prevents cross-using student/admin tokens on wrong endpoint groups.
 - Data integrity constraints:
   - Unique indexes enforce identities and anti-duplication (for example, one attendance per `studentEmail + sessionId`).
-  - Beacon mapping uniqueness enforced (`uuid + major + minor`, and one beacon per hall).
+  - Beacon identity uniqueness is enforced by `uuid + major + minor`; a hall can have multiple enabled beacon mappings.
 - Protected file access:
   - Enrollment images are served through admin-protected API endpoints (not public static hosting).
 - Audit logging:

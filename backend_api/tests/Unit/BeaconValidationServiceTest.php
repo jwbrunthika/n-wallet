@@ -127,4 +127,113 @@ class BeaconValidationServiceTest extends TestCase
         $this->assertFalse($result['passed']);
         $this->assertSame('BEACON_UNSTABLE', $result['reasonCode']);
     }
+
+    public function test_it_passes_when_any_expected_beacon_matches(): void
+    {
+        $service = new BeaconValidationService();
+        $beacons = [
+            new Beacon([
+                'uuid' => 'first',
+                'major' => 1,
+                'minor' => 2,
+                'hallId' => 'hall-1',
+                'enabled' => true,
+            ]),
+            new Beacon([
+                'uuid' => 'second',
+                'major' => 3,
+                'minor' => 4,
+                'hallId' => 'hall-1',
+                'enabled' => true,
+            ]),
+        ];
+
+        $result = $service->validateAny($beacons, [
+            'uuid' => 'second',
+            'major' => 3,
+            'minor' => 4,
+            'avgRssi' => -62,
+            'durationSec' => 9,
+            'distanceMeters' => null,
+        ], -70, 8);
+
+        $this->assertTrue($result['passed']);
+        $this->assertNull($result['reasonCode']);
+    }
+
+    public function test_it_fails_when_no_expected_beacon_matches(): void
+    {
+        $service = new BeaconValidationService();
+        $beacons = [
+            new Beacon([
+                'uuid' => 'first',
+                'major' => 1,
+                'minor' => 2,
+                'hallId' => 'hall-1',
+                'enabled' => true,
+            ]),
+        ];
+
+        $result = $service->validateAny($beacons, [
+            'uuid' => 'unknown',
+            'major' => 1,
+            'minor' => 2,
+            'avgRssi' => -62,
+            'durationSec' => 9,
+            'distanceMeters' => null,
+        ], -70, 8);
+
+        $this->assertFalse($result['passed']);
+        $this->assertSame('BEACON_MISMATCH', $result['reasonCode']);
+    }
+
+    public function test_it_keeps_threshold_failure_for_matching_beacon(): void
+    {
+        $service = new BeaconValidationService();
+        $beacons = [
+            new Beacon([
+                'uuid' => 'first',
+                'major' => 1,
+                'minor' => 2,
+                'hallId' => 'hall-1',
+                'enabled' => true,
+            ]),
+            new Beacon([
+                'uuid' => 'second',
+                'major' => 3,
+                'minor' => 4,
+                'hallId' => 'hall-1',
+                'enabled' => true,
+            ]),
+        ];
+
+        $result = $service->validateAny($beacons, [
+            'uuid' => 'second',
+            'major' => 3,
+            'minor' => 4,
+            'avgRssi' => -85,
+            'durationSec' => 9,
+            'distanceMeters' => null,
+        ], -70, 8);
+
+        $this->assertFalse($result['passed']);
+        $this->assertSame('BEACON_WEAK', $result['reasonCode']);
+    }
+
+    public function test_it_fails_when_expected_beacon_list_is_empty(): void
+    {
+        $service = new BeaconValidationService();
+
+        $result = $service->validateAny([], [
+            'uuid' => 'second',
+            'major' => 3,
+            'minor' => 4,
+            'avgRssi' => -62,
+            'durationSec' => 9,
+            'distanceMeters' => null,
+        ], -70, 8);
+
+        $this->assertFalse($result['passed']);
+        $this->assertSame('BEACON_MISMATCH', $result['reasonCode']);
+    }
 }

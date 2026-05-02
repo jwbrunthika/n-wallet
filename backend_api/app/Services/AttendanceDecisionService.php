@@ -67,12 +67,12 @@ class AttendanceDecisionService
         $bestFaceScore = $this->identityVerificationService->bestFaceScore($student, $faceFrames);
         $facePass = $bestFaceScore >= $faceThreshold;
 
-        $expectedBeacon = Beacon::query()
+        $expectedBeacons = Beacon::query()
             ->where('hallId', (string) $session->hallId)
             ->where('enabled', true)
-            ->first();
+            ->get();
 
-        if (! $expectedBeacon) {
+        if ($expectedBeacons->isEmpty()) {
             return $this->persistRejected(
                 $student->email,
                 (string) $session->_id,
@@ -84,8 +84,8 @@ class AttendanceDecisionService
 
         // Beacon evidence decision uses summarized client values only.
         // Backend requires exact beacon identity match plus threshold checks.
-        $beaconDecision = $this->beaconValidationService->validate(
-            $expectedBeacon,
+        $beaconDecision = $this->beaconValidationService->validateAny(
+            $expectedBeacons,
             $beaconEvidence,
             $beaconRssiThreshold,
             $beaconStabilitySeconds,

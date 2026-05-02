@@ -33,4 +33,34 @@ class BeaconValidationService
 
         return ['passed' => true, 'reasonCode' => null];
     }
+
+    /**
+     * @param iterable<Beacon> $expectedBeacons
+     * @param array{uuid:string,major:int,minor:int,avgRssi:float,durationSec:int,distanceMeters?:?float} $evidence
+     */
+    public function validateAny(iterable $expectedBeacons, array $evidence, float $rssiThreshold, int $stabilitySeconds, float $maxDistanceMeters = 10.0): array
+    {
+        foreach ($expectedBeacons as $expectedBeacon) {
+            if (! $this->identityMatches($expectedBeacon, $evidence)) {
+                continue;
+            }
+
+            return $this->validate(
+                $expectedBeacon,
+                $evidence,
+                $rssiThreshold,
+                $stabilitySeconds,
+                $maxDistanceMeters
+            );
+        }
+
+        return ['passed' => false, 'reasonCode' => 'BEACON_MISMATCH'];
+    }
+
+    private function identityMatches(Beacon $expectedBeacon, array $evidence): bool
+    {
+        return strtolower((string) $expectedBeacon->uuid) === strtolower((string) ($evidence['uuid'] ?? '')) &&
+            (int) $expectedBeacon->major === (int) ($evidence['major'] ?? -1) &&
+            (int) $expectedBeacon->minor === (int) ($evidence['minor'] ?? -1);
+    }
 }

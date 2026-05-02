@@ -68,10 +68,15 @@ class StudentSessionController extends ApiController
     private function mapSession(LectureSession $session): array
     {
         $hallId = (string) $session->hallId;
-        $beacon = Beacon::query()
+        $beacons = Beacon::query()
             ->where('hallId', $hallId)
             ->where('enabled', true)
-            ->first();
+            ->get();
+        $expectedBeacons = $beacons->map(fn (Beacon $beacon): array => [
+            'uuid' => $beacon->uuid,
+            'major' => (int) $beacon->major,
+            'minor' => (int) $beacon->minor,
+        ])->values()->all();
 
         return [
             'id' => (string) $session->_id,
@@ -89,11 +94,8 @@ class StudentSessionController extends ApiController
             'notes' => $session->notes,
             'attendanceOpenMinutesBefore' => (int) $session->attendanceOpenMinutesBefore,
             'attendanceCloseMinutesAfter' => (int) $session->attendanceCloseMinutesAfter,
-            'expectedBeacon' => $beacon ? [
-                'uuid' => $beacon->uuid,
-                'major' => (int) $beacon->major,
-                'minor' => (int) $beacon->minor,
-            ] : null,
+            'expectedBeacon' => $expectedBeacons[0] ?? null,
+            'expectedBeacons' => $expectedBeacons,
         ];
     }
 

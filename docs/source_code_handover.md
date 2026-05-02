@@ -529,7 +529,7 @@ Check:
 
 1. student has academic profile assigned
 2. session belongs to student course/batch/mode
-3. hall has enabled beacon mapping
+3. hall has one or more enabled beacon mappings
 4. face score threshold and beacon threshold settings
 
 ## 12) Testing Status and Gaps
